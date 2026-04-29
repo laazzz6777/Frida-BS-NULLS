@@ -1,0 +1,214 @@
+// gui spectate button ok
+let activeIntervals = [];
+let activeTimeouts = [];
+let activeHooks = [];
+
+function clearAllIntervals() {
+    for (let id of activeIntervals) clearInterval(id);
+    activeIntervals = [];
+}
+
+function clearAllTimeouts() {
+    for (let id of activeTimeouts) clearTimeout(id);
+    activeTimeouts = [];
+}
+
+function unloadScript() {
+    clearAllIntervals();
+    clearAllTimeouts();
+    for (let hook of activeHooks) {
+        try { hook.detach(); } catch (e) {}
+    }
+    activeHooks = [];
+}
+
+Script.bindWeak(this, function () {
+    unloadScript();
+    console.log("[*] Script unloaded, cleanup done.");
+});
+
+let isMenuOpen = false;
+let aimbotEnabled = true;
+let dodgeEnabled = true;
+
+let menuButtons = [];
+let menuMainBtn = null;
+let aimbotBtn = null;
+let dodgeBtn = null;
+
+function initializeMod() {
+    "use strict";
+    unloadScript();
+
+    const libgBase = Module.findBaseAddress("libg.so");
+    if (!libgBase) {
+        console.log("libg.so not found!");
+        return;
+    }
+
+    const libcMalloc = new NativeFunction(Module.getExportByName("libc.so", "malloc"), "pointer", ["uint"]);
+    const libcFree = new NativeFunction(Module.getExportByName("libc.so", "free"), "void", ["pointer"]);
+
+    // Offsets (kept as 0x0 - non-functional placeholders)
+    const Offsets = {
+        VTABLE_PROJECTILE_DATA: 0x0,
+        StringTable_getMovieClip: 0x0,
+        GameButtonCtor: 0x0,
+        TextField_setText: 0x0,
+        MovieClip_getTextFieldByName: 0x0,
+        MovieClipHelper_setTextAndScaleIfNecessary: 0x0,
+        MovieClip_gotoAndStopFrameIndex: 0x0,
+        DisplayObject_setXY: 0x0,
+        Stage_addChild: 0x0,
+        Stage_instance: 0x0,
+        ButtonClickHook: 0x0
+    };
+
+    const StageInstancePtr = libgBase.add(Offsets.Stage_instance).readPointer();
+    
+    const NativeFuncs = {
+        StringTable_getMovieClip: new NativeFunction(libgBase.add(Offsets.StringTable_getMovieClip), "pointer", ["pointer", "pointer"]),
+        GameButtonCtor: new NativeFunction(libgBase.add(Offsets.GameButtonCtor), "void", ["pointer"]),
+        TextField_setText: new NativeFunction(libgBase.add(Offsets.TextField_setText), "pointer", ["pointer", "pointer", "int"]),
+        MovieClip_getTextFieldByName: new NativeFunction(libgBase.add(Offsets.MovieClip_getTextFieldByName), "pointer", ["pointer", "pointer"]),
+        MovieClipHelper_setTextAndScale: new NativeFunction(libgBase.add(Offsets.MovieClipHelper_setTextAndScaleIfNecessary), "void", ["pointer", "pointer", "int", "int"]),
+        MovieClip_gotoAndStopFrameIndex: new NativeFunction(libgBase.add(Offsets.MovieClip_gotoAndStopFrameIndex), "void", ["pointer", "int"]),
+        DisplayObject_setXY: new NativeFunction(libgBase.add(Offsets.DisplayObject_setXY), "void", ["pointer", "float", "float"]),
+        Stage_addChild: new NativeFunction(libgBase.add(Offsets.Stage_addChild), "pointer", ["pointer", "pointer"])
+    };
+
+    const StringManager = {
+        createPtr: function (str) {
+            const ptr = libcMalloc(str.length + 1);
+            Memory.writeUtf8String(ptr, str);
+            return ptr;
+        },
+        createObject: function (str) {
+            const strPtr = StringManager.createPtr(str);
+            const strObj = libcMalloc(96);
+            // StringCtor would be here but offset is 0x0
+            libcFree(strPtr);
+            return strObj;
+        }
+    };
+
+    function showFloatingText(text) {
+        try {
+            console.log("[GUI] " + text);
+        } catch (e) {}
+    }
+
+    function createButton(text, x, y, callback, styleIndex = 2) {
+        try {
+            const btnObj = Memory.alloc(528);
+            const scPtr = StringManager.createPtr("sc/ui.sc");
+            const btnNamePtr = StringManager.createPtr("map_editor_exit_button");
+            const movieClip = NativeFuncs.StringTable_getMovieClip(scPtr, btnNamePtr);
+            
+            if (!movieClip || movieClip.isNull()) {
+                libcFree(scPtr); libcFree(btnNamePtr); return null;
+            }
+            
+            NativeFuncs.GameButtonCtor(btnObj);
+            
+            const txtObj = StringManager.createObject(text);
+            NativeFuncs.TextField_setText(btnObj, txtObj, 1);
+            
+            const tfNamePtr = StringManager.createPtr("Text");
+            const textField = NativeFuncs.MovieClip_getTextFieldByName(movieClip, tfNamePtr);
+            libcFree(tfNamePtr);
+            
+            if (textField && !textField.isNull()) {
+                NativeFuncs.MovieClipHelper_setTextAndScale(textField, txtObj, 0, 0);
+            }
+            
+            NativeFuncs.MovieClip_gotoAndStopFrameIndex(movieClip, styleIndex);
+            NativeFuncs.DisplayObject_setXY(btnObj, x, y);
+            NativeFuncs.Stage_addChild(StageInstancePtr, btnObj);
+            
+            const clickHook = Interceptor.attach(libgBase.add(Offsets.ButtonClickHook), {
+                onEnter(args) {
+                    if (btnObj.toInt32() === args[0].toInt32()) callback();
+                }
+            });
+            activeHooks.push(clickHook);
+            
+            libcFree(scPtr); libcFree(btnNamePtr);
+            return {button: btnObj, textObj: txtObj, movieClip: movieClip, originalX: x, originalY: y};
+        } catch (e) { return null; }
+    }
+
+    function toggleMenu() {
+        isMenuOpen = !isMenuOpen;
+        const stateText = isMenuOpen ? "HIDE" : "MENU";
+        if (menuMainBtn && menuMainBtn.button && !menuMainBtn.button.isNull()) {
+            NativeFuncs.TextField_setText(menuMainBtn.button, StringManager.createObject(stateText), 1);
+        }
+        
+        for (let btn of menuButtons) {
+            if (btn && btn.button && !btn.button.isNull()) {
+                if (isMenuOpen) {
+                    NativeFuncs.DisplayObject_setXY(btn.button, btn.originalX, btn.originalY);
+                } else {
+                    NativeFuncs.DisplayObject_setXY(btn.button, -1000, -1000);
+                }
+            }
+        }
+        showFloatingText(isMenuOpen ? "Menu opened" : "Menu closed");
+    }
+
+    function buildUI() {
+        // Main menu button
+        menuMainBtn = createButton("MENU", 60, 100, function () { toggleMenu(); });
+        
+        // Aimbot button
+        aimbotBtn = createButton("AIMBOT✔", 60, 200, function () {
+            aimbotEnabled = !aimbotEnabled;
+            if (aimbotBtn && aimbotBtn.button) {
+                NativeFuncs.TextField_setText(aimbotBtn.button, StringManager.createObject(aimbotEnabled ? "AIMBOT✔" : "AIMBOT❌"), 1);
+            }
+            showFloatingText(aimbotEnabled ? "Aimbot: ON" : "Aimbot: OFF");
+        });
+        if (aimbotBtn) menuButtons.push(aimbotBtn);
+        
+        // Dodge button
+        dodgeBtn = createButton("DODGE✔", 60, 250, function () {
+            dodgeEnabled = !dodgeEnabled;
+            if (dodgeBtn && dodgeBtn.button) {
+                NativeFuncs.TextField_setText(dodgeBtn.button, StringManager.createObject(dodgeEnabled ? "DODGE✔" : "DODGE❌"), 1);
+            }
+            showFloatingText(dodgeEnabled ? "Dodge: ON" : "Dodge: OFF");
+        });
+        if (dodgeBtn) menuButtons.push(dodgeBtn);
+        
+        // Hide all buttons initially
+        for (let btn of menuButtons) {
+            if (btn && btn.button && !btn.button.isNull()) NativeFuncs.DisplayObject_setXY(btn.button, -1000, -1000);
+        }
+    }
+
+    setTimeout(() => {
+        buildUI();
+        showFloatingText("Mod Loaded - Press MENU");
+    }, 1000);
+}
+
+(function () {
+    function waitForLibrary(libName, callback) {
+        const intervalId = setInterval(function () {
+            try {
+                const baseAddr = Module.findBaseAddress(libName);
+                if (baseAddr) {
+                    clearInterval(intervalId);
+                    setTimeout(function () { callback(baseAddr); }, 1000);
+                }
+            } catch (e) {}
+        }, 50);
+    }
+
+    waitForLibrary("libg.so", function (baseAddress) {
+        try {
+            initializeMod();
+        } catch (e) {}
+    });
+}());
