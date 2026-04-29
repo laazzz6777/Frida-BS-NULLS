@@ -1,0 +1,337 @@
+//nulls
+
+    const OFFSETS = {
+    LogicGameObjectClient_getX: 0xA86AB4,
+    LogicGameObjectClient_getY: 0xA86ABC,
+    LogicGameObjectClient_getGlobalID: 0xA86A60,
+    LogicGameObjectClient_getData: 0xA86A58,
+    LogicCharacterClient_getVelocityX: 0xB1EB5C,
+    LogicCharacterClient_getVelocityY: 0xB1EB64,
+    LogicCharacterClient_isAlive: 0xB1FFC8,
+    LogicProjectileData_getSpeed: 0x9F0C5C,
+    LogicProjectileData_getRadius: 0x9F0EFC,
+    LogicProjectileData_getAngle: 0x9F0EF0,
+    LogicCharacterData_getCollisionRadius: 0x9B0C18,
+    LogicBattleModeClient_getOwnCharacter: 0xB20614,
+    LogicBattleModeClient_getOwnPlayerTeam: 0xB20630,
+    LogicBattleModeClient_setClientPredictionMoveTo: 0xB20830,
+    LogicBattleModeClient_isWallBetween: 0xCC6328,
+    LogicBattleModeClient_update: 0xBF9514,
+    BattleMode_getInstance: 0xB53CD4,
+    ClientInputManager_addInput: 0x4B1EAC,
+    ClientInput_constructor_int: 0xB30620,
+    InputMgrOffset: 0x11A20E8,
+    Stage_Instance: 0x011A59B8,
+    Stage_addChild: 0xBA7DA8,
+    GameButton_GameButton: 0x57C0A8,
+    StringTable_getMovieClip: 0x49DA60,
+    gotoAndStop: 0x6DBBC0,
+    StringCtor: 0xD52880,
+    CustomButton_buttonPressed: 0xA06EFC,
+    GameMain_loadAsset: 0x49E11C,
+    TextField_setText: 0x57AE9C,
+    DisplayObject_setPixelSnappedXY: 0xBA2284,
+    dropGUIContainer_DropGUIContainer: 0x57BC80,
+    Sprite_Sprite: 0xBB7148,
+    BattleScreen_updateMovement: 0x541CD4,
+    VTABLE_PROJECTILE_DATA: 0x010C2100
+};
+
+let libBase = null;
+let funcs = {};
+let dodgeEnabled = true;
+let btn = null;
+let isDodging = false;
+let blockInput = false;
+let lastDodgeTime = 0;
+let dodgeCooldown = 0.1;
+let angles = 360;
+let vel = {x:0,y:0};
+let lastPos = {x:0,y:0};
+let lastTime = 0;
+let gameClient = ptr(0);
+let ownChar = ptr(0);
+let ownTeam = -1;
+let playerRad = 45;
+
+function patternScan(base, pattern, off) {
+    let bytes = pattern.split(" ").map(b => b === "??" ? null : parseInt(b,16));
+    for (let i = 0; i < 0x2000000; i++) {
+        let match = true;
+        for (let j = 0; j < bytes.length; j++) {
+            if (bytes[j] !== null && base.add(i+j).readU8() !== bytes[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return base.add(i + (off||0));
+    }
+    return null;
+}
+
+function findOffsets(base) {
+    let tmp = {};
+    let p;
+    p = patternScan(base, "F9 5B 00 80 38 02 1F D6 F9 5B 00 80");
+    if (p) tmp.LogicGameObjectClient_getX = p.sub(base).toNumber();
+    p = patternScan(base, "F9 5B 00 80 3C 02 1F D6 F9 5B 00 80");
+    if (p) tmp.LogicGameObjectClient_getY = p.sub(base).toNumber();
+    p = patternScan(base, "48 40 00 79 00 80 00 79 C0 03 5F D6");
+    if (p) tmp.LogicCharacterClient_getVelocityX = p.sub(base).toNumber();
+    p = patternScan(base, "4C 40 00 79 00 80 00 79 C0 03 5F D6");
+    if (p) tmp.LogicCharacterClient_getVelocityY = p.sub(base).toNumber();
+    p = patternScan(base, "F8 80 00 79 00 40 00 79 C0 03 5F D6");
+    if (p) tmp.LogicBattleModeClient_getOwnCharacter = p.sub(base).toNumber();
+    p = patternScan(base, "14 95 BF 00 00 00 00 00");
+    if (p) tmp.LogicBattleModeClient_update = p.sub(base).toNumber();
+    p = patternScan(base, "B8 59 1A 01 00 00 00 00");
+    if (p) tmp.Stage_Instance = p.readPointer().sub(base).toNumber();
+    p = patternScan(base, "C0 A8 57 00 00 00 00 00");
+    if (p) tmp.GameButton_GameButton = p.sub(base).toNumber();
+    p = patternScan(base, "FC 6E A0 00 00 00 00 00");
+    if (p) tmp.CustomButton_buttonPressed = p.sub(base).toNumber();
+    return {...OFFSETS, ...tmp};
+}
+
+function strPtr(s) { return Memory.allocUtf8String(s); }
+function scPtr(s, ctor) { let p = Memory.alloc(32); ctor(p, strPtr(s)); return p; }
+
+function updateVelocity(px, py, now) {
+    if (lastTime !== 0) {
+        let dt = (now - lastTime) / 1000;
+        if (dt > 0.01) {
+            let vx = (px - lastPos.x) / dt;
+            let vy = (py - lastPos.y) / dt;
+            vel.x = 0.4 * vx + 0.6 * vel.x;
+            vel.y = 0.4 * vy + 0.6 * vel.y;
+        }
+    } else {
+        vel.x = 0; vel.y = 0;
+    }
+    lastPos.x = px; lastPos.y = py; lastTime = now;
+}
+
+function exactCollision(px, py, pvx, pvy, prad, qx, qy, qvx, qvy, qrad) {
+    let dx = qx - px, dy = qy - py;
+    let dvx = qvx - pvx, dvy = qvy - pvy;
+    let a = dvx*dvx + dvy*dvy;
+    let b = 2*(dx*dvx + dy*dvy);
+    let rs = prad + qrad + 1;
+    let c = dx*dx + dy*dy - rs*rs;
+    if (c < 0) return 0;
+    if (a < 1e-6) return b < 0 ? -c / b : null;
+    let disc = b*b - 4*a*c;
+    if (disc < 0) return null;
+    let t1 = (-b - Math.sqrt(disc)) / (2*a);
+    let t2 = (-b + Math.sqrt(disc)) / (2*a);
+    return t1 >= 0 ? t1 : (t2 >= 0 ? t2 : null);
+}
+
+function getThreats() {
+    if (!gameClient || gameClient.isNull()) return [];
+    let mgr = gameClient.add(40).readPointer();
+    if (!mgr) return [];
+    let cnt = mgr.add(12).readU32();
+    if (cnt === 0 || cnt > 2000) return [];
+    let arr = mgr.readPointer();
+    if (!arr) return [];
+    let projVtable = libBase.add(funcs.vtableProj);
+    let threats = [];
+    let px = funcs.getX(ownChar);
+    let py = funcs.getY(ownChar);
+    for (let i = 0; i < cnt; i++) {
+        let obj = arr.add(i*8).readPointer();
+        if (!obj) continue;
+        let data = funcs.getData(obj);
+        if (!data) continue;
+        if (!data.readPointer().equals(projVtable)) continue;
+        let team = obj.add(64).readU32();
+        let dead = obj.add(208).readU32();
+        if (team === ownTeam || dead !== 0) continue;
+        let x = funcs.getX(obj), y = funcs.getY(obj);
+        let sp = funcs.getProjSpeed(data);
+        let rad = funcs.getProjRad(data);
+        let ang = funcs.getProjAngle ? funcs.getProjAngle(obj) : 0;
+        let ttc = exactCollision(px, py, vel.x, vel.y, playerRad, x, y, Math.cos(ang)*sp, Math.sin(ang)*sp, rad);
+        if (ttc !== null && ttc < 0.5 && ttc > 0) {
+            threats.push({x, y, sp, rad, ang, ttc});
+        }
+    }
+    return threats;
+}
+
+function safety(angle, threats, px, py, pvx, pvy, dist) {
+    let dx = px + Math.cos(angle)*dist;
+    let dy = py + Math.sin(angle)*dist;
+    let minD = Infinity;
+    for (let t of threats) {
+        let ex = t.x + Math.cos(t.ang)*t.sp*(t.ttc+0.1);
+        let ey = t.y + Math.sin(t.ang)*t.sp*(t.ttc+0.1);
+        let d = Math.hypot(dx - ex, dy - ey);
+        if (d < minD) minD = d;
+    }
+    return minD;
+}
+
+function bestDodge(threats, px, py, pvx, pvy, prad) {
+    if (threats.length === 0) return null;
+    threats.sort((a,b) => a.ttc - b.ttc);
+    let t = threats[0];
+    let dodgeDist = prad + t.rad + 1;
+    let bestAngle = null;
+    let bestSafe = -Infinity;
+    let step = (Math.PI * 2) / angles;
+    for (let i = 0; i < angles; i++) {
+        let ang = i * step;
+        let destX = px + Math.cos(ang)*dodgeDist;
+        let destY = py + Math.sin(ang)*dodgeDist;
+        if (funcs.isWall && funcs.isWall(gameClient, px, py, destX, destY)) continue;
+        let safe = safety(ang, threats, px, py, pvx, pvy, dodgeDist);
+        if (safe > bestSafe) {
+            bestSafe = safe;
+            bestAngle = ang;
+        }
+    }
+    if (bestAngle === null) return null;
+    let destX = px + Math.cos(bestAngle)*dodgeDist;
+    let destY = py + Math.sin(bestAngle)*dodgeDist;
+    let dx = destX - px;
+    let dy = destY - py;
+    let dist = Math.hypot(dx, dy);
+    let extra = 5;
+    let moveX = px + (dx / dist) * (dist + extra);
+    let moveY = py + (dy / dist) * (dist + extra);
+    return { x: moveX, y: moveY };
+}
+
+function forceMove(x, y) {
+    let battle = funcs.getBattle();
+    if (!battle || battle.isNull()) return;
+    let mgr = battle.add(funcs.inputMgr).readPointer();
+    if (!mgr || mgr.isNull()) return;
+    let inp = Memory.alloc(96);
+    funcs.allocInput(inp, 1);
+    inp.add(12).writeFloat(x);
+    inp.add(16).writeFloat(y);
+    funcs.addInput(mgr, inp);
+}
+
+function execDodge(x, y) {
+    if (isDodging || blockInput) return;
+    isDodging = true;
+    blockInput = true;
+    forceMove(x, y);
+    setTimeout(() => {
+        isDodging = false;
+        blockInput = false;
+    }, 100);
+}
+
+function createUI(stage) {
+    funcs.loadAsset(scPtr("sc/debug.sc", funcs.stringCtor), 0);
+    let clip = funcs.getMovieClip(strPtr("sc/debug.sc"), strPtr("debug_menu_category"));
+    btn = Memory.alloc(528);
+    funcs.gameButton(btn);
+    let vtable = btn.readPointer();
+    new NativeFunction(vtable.add(360).readPointer(), 'void', ['pointer','pointer','bool'])(btn, clip, 1);
+    funcs.setText(btn, scPtr("Dodge ON", funcs.stringCtor), 1);
+    funcs.setXY(btn, 60, 200);
+    btn.add(78).writeU8(1);
+    funcs.stageAdd(stage, btn);
+}
+
+function installHooks() {
+    let moveUpdate = libBase.add(funcs.updateMovement);
+    if (!moveUpdate.isNull()) {
+        Interceptor.attach(moveUpdate, {
+            onEnter: function(args) {
+                if (blockInput) {
+                    args[1].writeFloat(0);
+                    args[2].writeFloat(0);
+                }
+            }
+        });
+    }
+    Interceptor.attach(libBase.add(funcs.customButton), {
+        onEnter: function(args) {
+            if (btn && args[0].equals(btn)) {
+                dodgeEnabled = !dodgeEnabled;
+                funcs.setText(btn, scPtr(dodgeEnabled ? "Dodge ON" : "Dodge OFF", funcs.stringCtor), 1);
+            }
+        }
+    });
+    Interceptor.attach(libBase.add(funcs.update), {
+        onEnter: function(args) {
+            try {
+                gameClient = args[0];
+                if (!gameClient || gameClient.isNull()) return;
+                ownChar = funcs.getOwnChar(gameClient);
+                if (!ownChar || ownChar.isNull()) return;
+                ownTeam = funcs.getOwnTeam(gameClient);
+                let data = funcs.getData(ownChar);
+                playerRad = data ? funcs.getCharRad(data) : 45;
+                let px = funcs.getX(ownChar);
+                let py = funcs.getY(ownChar);
+                let now = Date.now();
+                updateVelocity(px, py, now);
+                if (!dodgeEnabled) return;
+                if (isDodging) return;
+                if ((now - lastDodgeTime) < dodgeCooldown * 1000) return;
+                let threats = getThreats();
+                if (threats.length === 0) return;
+                let best = bestDodge(threats, px, py, vel.x, vel.y, playerRad);
+                if (best) {
+                    execDodge(best.x, best.y);
+                    lastDodgeTime = now;
+                }
+            } catch(e) {}
+        }
+    });
+}
+
+function init() {
+    libBase = Module.findBaseAddress("libg.so");
+    if (!libBase) { setTimeout(init, 500); return; }
+    let detected = findOffsets(libBase);
+    let base = libBase;
+    funcs = {
+        getX: new NativeFunction(base.add(detected.LogicGameObjectClient_getX), "uint32", ["pointer"]),
+        getY: new NativeFunction(base.add(detected.LogicGameObjectClient_getY), "uint32", ["pointer"]),
+        getData: new NativeFunction(base.add(detected.LogicGameObjectClient_getData), "pointer", ["pointer"]),
+        getVelX: new NativeFunction(base.add(detected.LogicCharacterClient_getVelocityX), "int32", ["pointer"]),
+        getVelY: new NativeFunction(base.add(detected.LogicCharacterClient_getVelocityY), "int32", ["pointer"]),
+        getProjSpeed: new NativeFunction(base.add(detected.LogicProjectileData_getSpeed), "uint32", ["pointer"]),
+        getProjRad: new NativeFunction(base.add(detected.LogicProjectileData_getRadius), "uint32", ["pointer"]),
+        getProjAngle: new NativeFunction(base.add(detected.LogicProjectileData_getAngle), "float", ["pointer"]),
+        getCharRad: new NativeFunction(base.add(detected.LogicCharacterData_getCollisionRadius), "uint32", ["pointer"]),
+        getOwnChar: new NativeFunction(base.add(detected.LogicBattleModeClient_getOwnCharacter), "pointer", ["pointer"]),
+        getOwnTeam: new NativeFunction(base.add(detected.LogicBattleModeClient_getOwnPlayerTeam), "uint32", ["pointer"]),
+        isWall: new NativeFunction(base.add(detected.LogicBattleModeClient_isWallBetween), "bool", ["pointer","int","int","int","int"]),
+        addInput: new NativeFunction(base.add(detected.ClientInputManager_addInput), "void", ["pointer","pointer"]),
+        allocInput: new NativeFunction(base.add(detected.ClientInput_constructor_int), "pointer", ["pointer","int"]),
+        getBattle: new NativeFunction(base.add(detected.BattleMode_getInstance), "pointer", []),
+        gameButton: new NativeFunction(base.add(detected.GameButton_GameButton), "void", ["pointer"]),
+        getMovieClip: new NativeFunction(base.add(detected.StringTable_getMovieClip), "pointer", ["pointer","pointer"]),
+        stageAdd: new NativeFunction(base.add(detected.Stage_addChild), "pointer", ["pointer","pointer"]),
+        setText: new NativeFunction(base.add(detected.TextField_setText), "pointer", ["pointer","pointer","bool"]),
+        setXY: new NativeFunction(base.add(detected.DisplayObject_setPixelSnappedXY), "void", ["pointer","float","float"]),
+        dropContainer: new NativeFunction(base.add(detected.dropGUIContainer_DropGUIContainer), "void", ["pointer","pointer"]),
+        sprite: new NativeFunction(base.add(detected.Sprite_Sprite), "void", ["pointer","int"]),
+        loadAsset: new NativeFunction(base.add(detected.GameMain_loadAsset), "pointer", ["pointer","int"]),
+        gotoStop: new NativeFunction(base.add(detected.gotoAndStop), "void", ["pointer","int"]),
+        stringCtor: new NativeFunction(base.add(detected.StringCtor), "pointer", ["pointer","pointer"]),
+        update: new NativeFunction(base.add(detected.LogicBattleModeClient_update), "void", ["pointer"]),
+        updateMovement: detected.BattleScreen_updateMovement,
+        customButton: detected.CustomButton_buttonPressed,
+        inputMgr: detected.InputMgrOffset,
+        vtableProj: detected.VTABLE_PROJECTILE_DATA
+    };
+    let stage = base.add(detected.Stage_Instance).readPointer();
+    createUI(stage);
+    installHooks();
+    let ptrace = Module.findExportByName("libc.so", "ptrace");
+    if (ptrace) Interceptor.replace(ptrace, new NativeCallback(() => 0, "int", ["int","int","pointer","pointer"]));
+    console.log("[✓] Dodge Ready");
+}
+
+setTimeout(init, 2000);
