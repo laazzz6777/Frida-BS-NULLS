@@ -1,0 +1,1103 @@
+//libk
+
+'use strict';
+
+// ─── Cleanup tracking ─────────────────────────────────────────────────────────
+let activeIntervals   = [];   // clearInterval handles
+let activeTimeouts    = [];   // clearTimeout handles
+let activeInterceptors = [];  // Interceptor handles (Frida)
+
+// ─── Game state ───────────────────────────────────────────────────────────────
+let gameBase     = null;   // Module base address of libg.so
+let entityListPtr = null;  // Pointer to the global entity list
+let localPlayer  = null;   // Pointer to the local player entity
+let malloc       = null;   // libc malloc NativeFunction
+let free         = null;   // libc free  NativeFunction
+let offsets      = null;   // Object holding all game function offsets
+
+// ─── Native function handles (resolved after gameBase is found) ───────────────
+let findObject      = null;
+let initComponent   = null;
+let getChildByName  = null;
+let setTextContent  = null;
+let setButtonType   = null;
+let setPosition     = null;
+let addToScene      = null;
+let setButtonText   = null;
+let setVisible      = null;
+let setImage        = null;
+let getRootNode     = null;
+let createString    = null;
+let setToast        = null;
+let origAntiCheatCheck = null;
+let strUtils        = null;   // String helper object  (alloc/free game strings)
+let showToast       = null;   // Display an in-game toast notification
+let gameApi         = null;   // Wrapped game API NativeFunctions
+
+// ─── Feature toggles ──────────────────────────────────────────────────────────
+let aimbotEnabled   = true;
+let aimbotActive    = false;
+let unlockEnabled   = false;  // Anti-cheat bypass
+let killAuraEnabled = false;
+let autoLootEnabled = false;
+let menuVisible     = false;
+
+// ─── Aimbot target ────────────────────────────────────────────────────────────
+let aimTargetX = 0;
+let aimTargetY = 0;
+
+// ─── UI handles ───────────────────────────────────────────────────────────────
+let menuBtn    = null;
+let uiButtons  = [];   // All toggle buttons
+let btnObjects = [];   // All button node objects
+
+// ─── Dodge / bullet-avoidance state ──────────────────────────────────────────
+const dodgeState = {
+    targetPtr:      ptr(0),   // Pointer to the tracked threat entity
+    targetId:       -1,
+    isDodging:      false,
+    dodgeReady:     false,
+    touchMap:       new Map(),  // Active bullet/projectile tracking
+    prevTouchMap:   new Map(),
+    lastUpdateTime: 0,
+    prevPos:        null,
+    dodgeTimer:     null,
+    lootTimer:      null,
+    killAuraTimer:  null,
+    dodgeActive:    true,
+    aimPos:         { x: 0, y: 0 },
+    prevAimPos:     { x: 0, y: 0 },
+    velocity:       { vx: 0, vy: 0 },
+    prevAimTime:    0,
+    targetList:     [],
+    lootPos:        { x: 0, y: 0 },
+    hasLootTarget:  false,
+    killAuraActive: false,
+    isInactive:     false,
+};
+
+// ─── Config (tunable constants) ───────────────────────────────────────────────
+const cfg = {
+    SCREEN_WIDTH:    550,
+    SCREEN_HEIGHT:   500,
+    HIT_RADIUS:      1.8,
+    MAX_TARGETS:     20,
+    MAX_AIM_DIST:    1400,
+    LOOT_RANGE:      25,
+    VELOCITY_SMOOTH: 0.2,
+    EXTRA_RADIUS:    180,
+    DODGE_INTERVAL:  100,
+    MIN_VELOCITY_PTS: 4,
+    MIN_CANDIDATES:  5,
+    LOOT_INTERVAL:   350,
+    VELOCITY_ALPHA:  0.6,
+    PREDICT_SCALE:   2.5,
+    MAX_PREDICT_MS:  500,
+    TEAM_FILTER:     80,
+    ENTITY_STRIDE:   150,
+    LOOT_TYPE:       10,
+    LOOT_SUBTYPE:    5,
+    LOOT_TICK_RATE:  400,
+    MAX_AIM_ANGLE:   Math.PI / 6,
+    KILLAURA_RADIUS: 150,
+};
+
+const featureFlags = {
+    initialized:       false,
+    killAuraUnlocked:  true,
+    aimbotUnlocked:    true,
+    dodgeUnlocked:     true,
+    lootUnlocked:      true,
+};
+
+// ─── Velocity tracker (smooth exponential-moving-average) ─────────────────────
+const velocityTracker = {
+    samples:    [],
+    velX:       0,
+    velY:       0,
+    smoothing:  0.7,
+    maxSamples: 5,
+
+    addSample(x, y) {
+        const now = Date.now();
+        const sample = { x, y, time: now };
+        this.samples.push(sample);
+        while (this.samples.length > this.maxSamples) this.samples.shift();
+
+        if (this.samples.length >= 2) {
+            const prev    = this.samples[this.samples.length - 2];
+            const curr    = this.samples[this.samples.length - 1];
+            const dt      = (curr.time - prev.time) / 1000;
+            if (dt > 0.01) {
+                const dvx = (curr.x - prev.x) / dt;
+                const dvy = (curr.y - prev.y) / dt;
+                this.velX = this.velX * this.smoothing + dvx * (1 - this.smoothing);
+                this.velY = this.velY * this.smoothing + dvy * (1 - this.smoothing);
+            }
+        }
+    },
+
+    predict(dt) {
+        if (this.samples.length < 2) return { x: aimTargetX, y: aimTargetY };
+        const last = this.samples[this.samples.length - 1];
+        const speed = Math.hypot(this.velX, this.velY);
+        if (speed < 1) return { x: last.x, y: last.y };
+        const t = Math.min(dt, 0.6);
+        return { x: last.x + this.velX * t, y: last.y + this.velY * t };
+    },
+
+    reset() {
+        this.samples = [];
+        this.velX = 0;
+        this.velY = 0;
+    }
+};
+
+// ─── Frida utility wrappers ───────────────────────────────────────────────────
+function attachInterceptor(address, callbacks) {
+    try {
+        if (!address || address.isNull()) return null;
+        return Interceptor.attach(address, callbacks);
+    } catch (e) {
+        return null;
+    }
+}
+
+function safeReplace(address, replacement) {
+    try {
+        if (!address || address.isNull()) return;
+        Interceptor.replace(address, replacement);
+    } catch (e) {}
+}
+
+function clearAllIntervals() {
+    for (const id of activeIntervals) clearInterval(id);
+    activeIntervals = [];
+}
+
+function clearAllTimeouts() {
+    for (const id of activeTimeouts) clearTimeout(id);
+    activeTimeouts = [];
+}
+
+function cleanupAll() {
+    clearAllIntervals();
+    clearAllTimeouts();
+    for (const interceptor of activeInterceptors) {
+        try { interceptor.detach(); } catch (e) {}
+    }
+    activeInterceptors = [];
+}
+
+Script.bindWeak(this, function() {
+    cleanupAll();
+    console.log('unloaded');
+});
+
+// ─── Memory helpers ───────────────────────────────────────────────────────────
+function freePointers(ptrArray) {
+    for (const p of ptrArray) {
+        if (p && !p.isNull()) free(p);
+    }
+}
+
+// ─── Bullet/projectile physics ────────────────────────────────────────────────
+
+/**
+ * Calculate time-to-hit for a bullet sweeping toward a point.
+ * Returns seconds until impact, or Infinity if no intersection.
+ */
+function calcBulletTimeToHit(bullet, targetX, targetY, velX, velY, teamRadius) {
+    const dx = Math.cos(bullet.angle) * bullet.speed - velX;
+    const dy = Math.sin(bullet.angle) * bullet.speed - velY;
+    const rx = bullet.startX - targetX;
+    const ry = bullet.startY - targetY;
+    const a  = dx * dx + dy * dy;
+    const b  = 2 * (rx * dx + ry * dy);
+    const r  = bullet.radius + teamRadius + cfg.EXTRA_RADIUS;
+    const c  = rx * rx + ry * ry - r * r;
+
+    if (c < 0) return 0;
+    if (a < 0.0001) {
+        if (Math.abs(b) < 0.0001) return Infinity;
+        const t0 = -c / b;
+        return t0 >= 0 ? t0 : Infinity;
+    }
+    const discriminant = b * b - 4 * a * c;
+    if (discriminant < 0) return Infinity;
+    const sqrtD = Math.sqrt(discriminant);
+    const t1 = (-b - sqrtD) / (2 * a);
+    if (t1 >= 0) return t1;
+    const t2 = (-b + sqrtD) / (2 * a);
+    return t2 >= 0 ? t2 : Infinity;
+}
+
+/**
+ * Calculate the closest approach distance between a bullet trajectory
+ * and a moving point (used to assess dodge quality).
+ */
+function calcClosestApproach(bullet, targetX, targetY, velX, velY) {
+    const dx = Math.cos(bullet.angle) * bullet.speed - velX;
+    const dy = Math.sin(bullet.angle) * bullet.speed - velY;
+    const rx = bullet.startX - targetX;
+    const ry = bullet.startY - targetY;
+    const a  = dx * dx + dy * dy;
+
+    if (a < 0.0001) return { t: 0, dist: Math.hypot(rx, ry) };
+
+    const t  = Math.max(0, -(rx * dx + ry * dy) / a);
+    const cx = bullet.startX + Math.cos(bullet.angle) * bullet.speed * t;
+    const cy = bullet.startY + Math.sin(bullet.angle) * bullet.speed * t;
+    const fx = targetX + velX * t;
+    const fy = targetY + velY * t;
+    return { t, dist: Math.hypot(cx - fx, cy - fy) };
+}
+
+// ─── Aim velocity tracker ─────────────────────────────────────────────────────
+function updateAimVelocity(x, y, timestamp) {
+    if (dodgeState.prevAimTime > 0) {
+        const dt = (timestamp - dodgeState.prevAimTime) / 1000;
+        if (dt > 0.01) {
+            const dvx   = (x - dodgeState.prevAimPos.x) / dt;
+            const dvy   = (y - dodgeState.prevAimPos.y) / dt;
+            const alpha = 1 - cfg.VELOCITY_ALPHA;
+            dodgeState.velocity.vx = alpha * dvx + cfg.VELOCITY_ALPHA * dodgeState.velocity.vx;
+            dodgeState.velocity.vy = alpha * dvy + cfg.VELOCITY_ALPHA * dodgeState.velocity.vy;
+        }
+    } else {
+        dodgeState.velocity.vx = 0;
+        dodgeState.velocity.vy = 0;
+    }
+    dodgeState.prevAimPos.x  = x;
+    dodgeState.prevAimPos.y  = y;
+    dodgeState.prevAimTime   = timestamp;
+}
+
+// ─── Threat scanning ──────────────────────────────────────────────────────────
+/**
+ * Walk the entity list and return all active bullet/projectile threats
+ * that could hit the local player.
+ */
+function getNearbyThreats() {
+    if (!localPlayer || localPlayer.isNull()) return [];
+
+    const entityArray = localPlayer.add(40).readPointer();
+    if (!entityArray || entityArray.isNull()) return [];
+
+    const count = entityArray.add(12).readU32();
+    if (count === 0 || count > 2000) return [];
+
+    const basePtr = entityArray.readPointer();
+    if (!basePtr || basePtr.isNull()) return [];
+
+    const now        = Date.now();
+    const threats    = [];
+    const seenIds    = new Set();
+
+    let targetX = 0, targetY = 0, targetTeam = 0;
+    const hasTarget = dodgeState.targetPtr && !dodgeState.targetPtr.isNull();
+    if (hasTarget) {
+        targetX    = gameApi.getPosX(dodgeState.targetPtr);
+        targetY    = gameApi.getPosY(dodgeState.targetPtr);
+        const comp = gameApi.getComponent(dodgeState.targetPtr);
+        targetTeam = comp ? gameApi.getEntityTeam(comp) : 0;
+    }
+
+    for (let i = 0; i < count; i++) {
+        const entity = basePtr.add(i * 8).readPointer();
+        if (!entity || entity.isNull()) continue;
+
+        const comp = gameApi.getComponent(entity);
+        if (!comp || comp.isNull()) continue;
+
+        // Skip entities whose vtable matches the entity-list marker (i.e. non-bullets)
+        const vtable = comp.readPointer();
+        if (!vtable.equals(gameBase.add(offsets.ENTITY_LIST_PTR_OFF))) continue;
+
+        const entityId  = gameApi.getEntityHp(entity);
+        seenIds.add(entityId);
+
+        const teamId    = entity.add(64).readU32();
+        const stateFlag = entity.add(208).readU32();
+
+        if (teamId === dodgeState.targetId || stateFlag !== 0) {
+            dodgeState.touchMap.delete(entityId);
+            dodgeState.prevTouchMap.delete(entityId);
+            continue;
+        }
+
+        const posX    = gameApi.getPosX(entity);
+        const posY    = gameApi.getPosY(entity);
+        const type    = gameApi.getEntityType(comp);
+        const subtype = gameApi.getEntitySubtype(comp);
+
+        // Get or create tracking entry for this projectile
+        let tracking = dodgeState.prevTouchMap.get(entityId);
+        if (!tracking) {
+            tracking = { history: [], angle: undefined, speed: type };
+            dodgeState.prevTouchMap.set(entityId, tracking);
+        }
+
+        tracking.history.push({ x: posX, y: posY, ts: now });
+        if (tracking.history.length > cfg.MIN_VELOCITY_PTS) tracking.history.shift();
+
+        // Estimate bullet angle and speed from trajectory history
+        let estimatedAngle = tracking.angle;
+        let angleKnown     = tracking.angle !== undefined;
+
+        if (tracking.history.length >= 2) {
+            const oldest   = tracking.history[0];
+            const newest   = tracking.history[tracking.history.length - 1];
+            const dxTotal  = newest.x - oldest.x;
+            const dyTotal  = newest.y - oldest.y;
+            const distTrav = Math.hypot(dxTotal, dyTotal);
+            const dtTotal  = (newest.ts - oldest.ts) / 1000;
+
+            if (distTrav > cfg.MIN_CANDIDATES && dtTotal > 0) {
+                estimatedAngle = Math.atan2(dyTotal, dxTotal);
+                angleKnown     = true;
+                tracking.angle = estimatedAngle;
+                const estimatedSpeed = distTrav / dtTotal;
+                if (estimatedSpeed > cfg.MAX_TARGETS) tracking.speed = estimatedSpeed;
+            }
+        }
+
+        const bulletSpeed = tracking.speed || type;
+        const bullet = {
+            startX: posX,
+            startY: posY,
+            speed:  bulletSpeed,
+            radius: subtype,
+            angle:  estimatedAngle,
+        };
+        dodgeState.touchMap.set(entityId, { ...bullet, ts: now });
+
+        // If this bullet is angled and fast enough, check if it's a threat
+        if (angleKnown && bulletSpeed > cfg.MAX_TARGETS && hasTarget) {
+            const approach = calcClosestApproach(bullet, targetX, targetY,
+                                                  dodgeState.velocity.vx, dodgeState.velocity.vy);
+            const threshold = subtype + targetTeam + cfg.EXTRA_RADIUS;
+
+            if (approach.dist < threshold) {
+                const timeToHit = calcBulletTimeToHit(bullet, targetX, targetY,
+                                                       dodgeState.velocity.vx, dodgeState.velocity.vy, targetTeam);
+                if (timeToHit < cfg.HIT_RADIUS) {
+                    threats.push({ ...bullet, t: timeToHit, bulletDist: approach.dist, id: entityId });
+                }
+            }
+        }
+    }
+
+    // Purge stale bullets from the tracking maps
+    for (const [id, entry] of dodgeState.touchMap) {
+        if (!seenIds.has(id) || now - entry.ts > cfg.MAX_AIM_DIST) {
+            dodgeState.touchMap.delete(id);
+            dodgeState.prevTouchMap.delete(id);
+        }
+    }
+
+    return threats;
+}
+
+// ─── Dodge direction evaluation ───────────────────────────────────────────────
+/**
+ * Score how safe a given dodge angle is — higher = safer.
+ * Returns the minimum distance to any incoming bullet trajectory.
+ */
+function evalDodgeAngle(angle, threats, playerX, playerY, velX, velY, teamRadius, predictMs) {
+    const endX = playerX + Math.cos(angle) * predictMs;
+    const endY = playerY + Math.sin(angle) * predictMs;
+    const dt   = cfg.SCREEN_HEIGHT / 1000;
+    let minDistSq = Infinity;
+
+    for (let i = 0; i < threats.length; i++) {
+        const b  = threats[i];
+        const bx = b.startX + Math.cos(b.angle) * b.speed * (b.t + dt);
+        const by = b.startY + Math.sin(b.angle) * b.speed * (b.t + dt);
+        const dx = endX - bx;
+        const dy = endY - by;
+        const distSq = dx * dx + dy * dy;
+        if (distSq < minDistSq) minDistSq = distSq;
+    }
+    return Math.sqrt(minDistSq);
+}
+
+/**
+ * Find the best dodge direction given the current set of threats.
+ * Returns { x, y, angle, dist, closestDist } or null.
+ */
+function findBestDodgeDir(threats, playerX, playerY, velX, velY, teamRadius, isUrgent) {
+    if (threats.length === 0) return null;
+
+    threats.sort((a, b) => a.t - b.t);
+    const nearestThreat = threats[0];
+    const speed = Math.hypot(velX, velY);
+    let predictMs = cfg.SCREEN_WIDTH;
+
+    if (speed > 10) {
+        const playerAngle = Math.atan2(velY, velX);
+        const threatAngle = Math.atan2(nearestThreat.startY - playerY,
+                                        nearestThreat.startX - playerX);
+        let angleDiff = Math.abs((playerAngle - threatAngle + Math.PI) % (2 * Math.PI) - Math.PI);
+        if (angleDiff < Math.PI / 3) {
+            predictMs += Math.min(cfg.MAX_PREDICT_MS, speed * cfg.PREDICT_SCALE);
+        }
+    }
+
+    const perpLeft  = nearestThreat.angle + Math.PI / 2;
+    const perpRight = nearestThreat.angle - Math.PI / 2;
+    const scoreLeft  = evalDodgeAngle(perpLeft,  threats, playerX, playerY, velX, velY, teamRadius, predictMs);
+    const scoreRight = evalDodgeAngle(perpRight, threats, playerX, playerY, velX, velY, teamRadius, predictMs);
+
+    let bestAngle = null;
+    let bestScore = -Infinity;
+
+    if (scoreLeft >= cfg.LOOT_TICK_RATE || scoreRight >= cfg.LOOT_TICK_RATE) {
+        bestAngle = scoreLeft >= scoreRight ? perpLeft : perpRight;
+        bestScore = Math.max(scoreLeft, scoreRight);
+    } else {
+        const sweepRange = isUrgent ? cfg.MAX_AIM_ANGLE : Math.PI / 12;
+        const sweepStep  = Math.PI / 24;
+
+        for (let delta = -sweepRange; delta <= sweepRange; delta += sweepStep) {
+            const angleA = perpLeft  + delta;
+            const angleB = perpRight + delta;
+            const scoreA = evalDodgeAngle(angleA, threats, playerX, playerY, velX, velY, teamRadius, predictMs);
+            const scoreB = evalDodgeAngle(angleB, threats, playerX, playerY, velX, velY, teamRadius, predictMs);
+            if (scoreA > bestScore) { bestScore = scoreA; bestAngle = angleA; }
+            if (scoreB > bestScore) { bestScore = scoreB; bestAngle = angleB; }
+        }
+
+        // Fallback: aim away from the centroid of all threats
+        if (bestScore < cfg.LOOT_INTERVAL) {
+            let cx = 0, cy = 0;
+            for (const t of threats) { cx += t.startX; cy += t.startY; }
+            cx /= threats.length; cy /= threats.length;
+            const awayAngle = Math.atan2(playerY - cy, playerX - cx);
+            const awayScore = evalDodgeAngle(awayAngle, threats, playerX, playerY, velX, velY, teamRadius, predictMs);
+            if (awayScore > bestScore) { bestScore = awayScore; bestAngle = awayAngle; }
+        }
+    }
+
+    if (bestAngle === null) return null;
+
+    return {
+        x:            playerX + Math.cos(bestAngle) * predictMs,
+        y:            playerY + Math.sin(bestAngle) * predictMs,
+        angle:        bestAngle,
+        dist:         predictMs,
+        closestDist:  bestScore,
+    };
+}
+
+// ─── Dodge execution ──────────────────────────────────────────────────────────
+function stopDodge() {
+    if (dodgeState.lootTimer) {
+        clearInterval(dodgeState.lootTimer);
+        dodgeState.lootTimer = null;
+    }
+    dodgeState.killAuraActive = false;
+}
+
+/**
+ * Send a touch event to steer the player toward (moveX, moveY).
+ */
+function sendTouchEvent(moveX, moveY) {
+    try {
+        if (!localPlayer || localPlayer.isNull()) return false;
+        const playerList = gameApi.getPlayerList();
+        if (!playerList || playerList.isNull()) return false;
+        const listBase = playerList.add(88).readPointer();
+        if (!listBase || listBase.isNull()) return false;
+        const eventBuf = malloc(96);
+        if (!eventBuf || eventBuf.isNull()) return false;
+        gameApi.allocEntity(eventBuf, 2);
+        eventBuf.add(12).writeS32(moveX);
+        eventBuf.add(16).writeS32(moveY);
+        gameApi.setEntityParent(listBase, eventBuf);
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+/**
+ * Start periodically nudging the player toward (destX, destY) to dodge.
+ */
+function startDodgeMove(destX, destY) {
+    stopDodge();
+    // Only push if we have drifted far enough from the target
+    if (localPlayer && dodgeState.targetPtr && !dodgeState.targetPtr.isNull()) {
+        const tx = gameApi.getPosX(dodgeState.targetPtr);
+        const ty = gameApi.getPosY(dodgeState.targetPtr);
+        if ((tx - destX) ** 2 + (ty - destY) ** 2 > 25)
+            sendTouchEvent(destX, destY);
+    }
+    dodgeState.lootTimer = setInterval(() => {
+        if (dodgeState.isDodging || dodgeState.isInactive)
+            sendTouchEvent(destX, destY);
+        else
+            stopDodge();
+    }, cfg.LOOT_TYPE);
+    activeIntervals.push(dodgeState.lootTimer);
+}
+
+/**
+ * Re-evaluate the threat list and decide if/where to dodge.
+ */
+function runDodgeLogic() {
+    if (!dodgeState.isDodging && !dodgeState.isInactive) return;
+
+    const tx   = gameApi.getPosX(dodgeState.targetPtr);
+    const ty   = gameApi.getPosY(dodgeState.targetPtr);
+    const comp = gameApi.getComponent(dodgeState.targetPtr);
+    const team = comp ? gameApi.getEntityTeam(comp) : 0;
+
+    const threats = getNearbyThreats();
+
+    if (threats.length === 0) {
+        if (dodgeState.isInactive) {
+            dodgeState.isInactive     = false;
+            dodgeState.hasLootTarget  = false;
+            dodgeState.killAuraActive = true;
+            stopDodge();
+            dodgeState.dodgeReady = false;
+        }
+        return;
+    }
+
+    // Check if any bullet will hit us
+    let incoming = false;
+    for (let i = 0; i < threats.length; i++) {
+        const tth = calcBulletTimeToHit(threats[i], tx, ty,
+                                         dodgeState.velocity.vx, dodgeState.velocity.vy, team);
+        if (tth < 0.8) { incoming = true; break; }
+    }
+
+    if (incoming) {
+        if (!dodgeState.isInactive) {
+            dodgeState.isInactive    = true;
+            dodgeState.dodgeReady    = true;
+            dodgeState.hasLootTarget = false;
+        }
+        const best = findBestDodgeDir(threats, tx, ty,
+                                       dodgeState.velocity.vx, dodgeState.velocity.vy, team, true);
+        if (best) {
+            let useDir = true;
+            if (dodgeState.hasLootTarget && dodgeState.lootPos.x !== 0) {
+                const awayAngle   = Math.atan2(dodgeState.lootPos.y - ty, dodgeState.lootPos.x - tx);
+                const awayScore   = evalDodgeAngle(awayAngle, threats, tx, ty,
+                                                    dodgeState.velocity.vx, dodgeState.velocity.vy,
+                                                    team, cfg.SCREEN_WIDTH);
+                if (best.closestDist < awayScore + cfg.KILLAURA_RADIUS) useDir = false;
+            }
+            if (useDir) {
+                dodgeState.lootPos.x    = best.x;
+                dodgeState.lootPos.y    = best.y;
+                dodgeState.hasLootTarget = true;
+                startDodgeMove(best.x, best.y);
+            }
+        }
+        if (dodgeState.killAuraTimer) clearTimeout(dodgeState.killAuraTimer);
+        dodgeState.killAuraTimer = setTimeout(runDodgeLogic, cfg.TEAM_FILTER);
+        activeTimeouts.push(dodgeState.killAuraTimer);
+    } else {
+        dodgeState.isInactive     = false;
+        dodgeState.hasLootTarget  = false;
+        dodgeState.killAuraActive = true;
+        stopDodge();
+        dodgeState.dodgeReady = false;
+    }
+}
+
+/**
+ * Called when a new threat is detected at (threatX, threatY).
+ * Arms the dodge system.
+ */
+function onThreatDetected(threatX, threatY) {
+    dodgeState.killAuraActive = true;
+    stopDodge();
+
+    if (dodgeState.dodgeReady && !dodgeState.isDodging && !dodgeState.isInactive) {
+        if (dodgeState.dodgeTimer) { clearTimeout(dodgeState.dodgeTimer); dodgeState.dodgeTimer = null; }
+        dodgeState.dodgeReady = false;
+    }
+
+    if (dodgeState.isDodging || dodgeState.dodgeReady) return;
+
+    if (dodgeState.prevPos)     clearTimeout(dodgeState.prevPos);
+    if (dodgeState.dodgeTimer)  clearTimeout(dodgeState.dodgeTimer);
+    if (dodgeState.killAuraTimer) clearTimeout(dodgeState.killAuraTimer);
+
+    dodgeState.isDodging      = true;
+    dodgeState.dodgeReady     = true;
+    dodgeState.isInactive     = false;
+    dodgeState.hasLootTarget  = false;
+    dodgeState.killAuraActive = false;
+    dodgeState.lastUpdateTime = Date.now();
+    dodgeState.aimPos.x       = threatX;
+    dodgeState.aimPos.y       = threatY;
+
+    startDodgeMove(threatX, threatY);
+
+    dodgeState.prevPos = setTimeout(() => {
+        dodgeState.isDodging = false;
+        runDodgeLogic();
+        if (!dodgeState.isInactive) {
+            dodgeState.killAuraActive = true;
+            stopDodge();
+            dodgeState.dodgeTimer = setTimeout(() => {
+                dodgeState.dodgeReady = false;
+            }, cfg.DODGE_INTERVAL);
+            activeTimeouts.push(dodgeState.dodgeTimer);
+        }
+    }, cfg.SCREEN_HEIGHT);
+    activeTimeouts.push(dodgeState.prevPos);
+}
+
+// ─── Aimbot: enemy scanner ────────────────────────────────────────────────────
+/**
+ * Scan entities and lock onto the nearest living enemy.
+ * Updates aimTargetX/Y and aimbotActive.
+ */
+function findNearestEnemy() {
+    try {
+        if (!localPlayer || localPlayer.isNull())
+            return velocityTracker.reset(), aimbotActive = false;
+
+        const selfObj = gameApi.getEntityObj(localPlayer);
+        if (!selfObj || selfObj.isNull())
+            return velocityTracker.reset(), aimbotActive = false;
+
+        const selfX    = gameApi.getPosX(selfObj);
+        const selfY    = gameApi.getPosY(selfObj);
+        const selfTeam = gameApi.isEntityAlive(localPlayer);  // used as team ID field here
+
+        const entityArray = localPlayer.add(40).readPointer();
+        if (!entityArray || entityArray.isNull()) return aimbotActive = false;
+        const count = entityArray.add(12).readU32();
+        if (count === 0 || count > 2000) return aimbotActive = false;
+        const basePtr = entityArray.readPointer();
+        if (!basePtr || basePtr.isNull()) return aimbotActive = false;
+
+        let nearestDistSq = Infinity;
+        let foundEnemy    = false;
+        let bestX = 0, bestY = 0;
+
+        for (let i = 0; i < count; i++) {
+            try {
+                const entity = basePtr.add(i * 8).readPointer();
+                if (!entity || entity.isNull()) continue;
+
+                const comp = gameApi.getComponent(entity);
+                if (!comp || comp.isNull()) continue;
+
+                // Skip if vtable matches entity list (not a player)
+                const vtable = comp.readPointer();
+                if (vtable && vtable.equals(gameBase.add(offsets.ENTITY_LIST_PTR_OFF))) continue;
+
+                const teamId    = entity.add(64).readU32();
+                const stateFlag = entity.add(208).readU32();
+
+                if (teamId === selfTeam || teamId === 0) continue;
+                if (stateFlag !== 0) continue;  // dead / invalid
+
+                const ex = gameApi.getPosX(entity);
+                const ey = gameApi.getPosY(entity);
+                const distSq = (ex - selfX) ** 2 + (ey - selfY) ** 2;
+
+                if (distSq < nearestDistSq) {
+                    nearestDistSq = distSq;
+                    bestX = ex;
+                    bestY = ey;
+                    foundEnemy = true;
+                }
+            } catch (e) { continue; }
+        }
+
+        if (foundEnemy) {
+            aimTargetX  = bestX;
+            aimTargetY  = bestY;
+            aimbotActive = true;
+            velocityTracker.addSample(aimTargetX, aimTargetY);
+            return true;
+        } else {
+            aimbotActive = false;
+            velocityTracker.reset();
+            return false;
+        }
+    } catch (e) {
+        aimbotActive = false;
+        velocityTracker.reset();
+        return false;
+    }
+}
+
+// ─── UI builder ───────────────────────────────────────────────────────────────
+/**
+ * Create a game UI button with the given label at (x, y).
+ * onClick is called when the button is tapped.
+ */
+function createButton(label, x, y, onClick, onClickArg = null, btnType = 2) {
+    try {
+        const nodeBuf   = Memory.alloc(528);
+        const uiPathStr = strUtils.allocCString('sc/ui.sc');
+        const btnIdStr  = strUtils.allocCString('map_editor_exit_button');
+        const uiObj     = findObject(uiPathStr, btnIdStr);
+
+        if (!uiObj || uiObj.isNull()) {
+            freePointers([uiPathStr, btnIdStr]);
+            return null;
+        }
+
+        initComponent(nodeBuf);
+        // Call the clone/init vtable slot
+        new NativeFunction(
+            nodeBuf.readPointer().add(360).readPointer(),
+            'void', ['pointer', 'pointer', 'bool']
+        )(nodeBuf, uiObj, true);
+
+        const labelPtr = strUtils.allocGameString(label);
+        setButtonText(nodeBuf, labelPtr, 1);
+
+        const textKey    = strUtils.allocCString('Text');
+        const textChild  = getChildByName(uiObj, textKey);
+        free(textKey);
+        if (textChild && !textChild.isNull())
+            setTextContent(textChild, labelPtr, 0, 0);
+
+        setButtonType(uiObj, btnType);
+        setPosition(nodeBuf, x, y);
+        addToScene(entityListPtr, nodeBuf);
+
+        const clickInterceptor = Interceptor.attach(gameBase.add(offsets.BTN_CLICK_OFF), {
+            onEnter(args) {
+                if (nodeBuf.toInt32() === args[0].toInt32()) onClick(onClickArg);
+            }
+        });
+        activeInterceptors.push(clickInterceptor);
+        freePointers([uiPathStr, btnIdStr]);
+
+        return { nodePtr: nodeBuf, labelPtr, uiObj, posX: x, posY: y };
+    } catch (e) {
+        return null;
+    }
+}
+
+function showWip() {
+    showToast('В разработке');   // "In development"
+}
+
+function toggleMenu() {
+    menuVisible = !menuVisible;
+    const label = menuVisible ? 'HIDE' : 't.me/BRFMod';
+    if (menuBtn && menuBtn.nodePtr && !menuBtn.nodePtr.isNull())
+        setButtonText(menuBtn.nodePtr, strUtils.allocGameString(label), 1);
+
+    for (const btn of uiButtons) {
+        if (btn && btn.nodePtr && !btn.nodePtr.isNull()) {
+            if (menuVisible)
+                setPosition(btn.nodePtr, btn.posX, btn.posY);
+            else
+                setPosition(btn.nodePtr, -1000, -1000);
+        }
+    }
+    showToast(menuVisible ? 't.me/BRFMod ✔' : 't.me/BRFMod ❌');
+}
+
+function buildUI() {
+    btnObjects = [];
+
+    menuBtn = createButton('MENU', 60, 100, toggleMenu);
+    if (menuBtn) btnObjects.push(menuBtn);
+
+    const unlockBtn = createButton('UNLOCK ❌', 60, 200, function() {
+        unlockEnabled = !unlockEnabled;
+        if (unlockBtn && unlockBtn.nodePtr && !unlockBtn.nodePtr.isNull())
+            setButtonText(unlockBtn.nodePtr,
+                strUtils.allocGameString(unlockEnabled ? 'UNLOCK ✔' : 'UNLOCK ❌'), 1);
+        showToast(unlockEnabled ? 't.me/BRFMod ✔' : 't.me/BRFMod ❌');
+    });
+    if (unlockBtn) uiButtons.push(unlockBtn);
+
+    const aimbotBtn = createButton('AIMBOT ✔', 60, 250, function() {
+        aimbotEnabled = !aimbotEnabled;
+        if (aimbotBtn && aimbotBtn.nodePtr && !aimbotBtn.nodePtr.isNull())
+            setButtonText(aimbotBtn.nodePtr,
+                strUtils.allocGameString(aimbotEnabled ? 'AIMBOT ✔' : 'AIMBOT ❌'), 1);
+        showToast(aimbotEnabled ? 't.me/BRFMod ✔' : 't.me/BRFMod ❌');
+        if (!aimbotEnabled) {
+            aimbotActive = false;
+            aimTargetX   = 0;
+            aimTargetY   = 0;
+            velocityTracker.reset();
+        }
+    });
+    if (aimbotBtn) uiButtons.push(aimbotBtn);
+
+    const dodgeBtn = createButton('DODGE ✔', 60, 300, function() {
+        dodgeState.dodgeActive = !dodgeState.dodgeActive;
+        if (dodgeBtn && dodgeBtn.nodePtr && !dodgeBtn.nodePtr.isNull())
+            setButtonText(dodgeBtn.nodePtr,
+                strUtils.allocGameString(dodgeState.dodgeActive ? 'DODGE ✔' : 'DODGE ❌'), 1);
+        showToast(dodgeState.dodgeActive ? 't.me/BRFMod ✔' : 't.me/BRFMod ❌');
+    });
+    if (dodgeBtn) uiButtons.push(dodgeBtn);
+
+    const killAuraBtn = createButton('KILLAURA ❌', 60, 350, function() {
+        killAuraEnabled = !killAuraEnabled;
+        if (killAuraBtn && killAuraBtn.nodePtr && !killAuraBtn.nodePtr.isNull())
+            setButtonText(killAuraBtn.nodePtr,
+                strUtils.allocGameString(killAuraEnabled ? 'KILLAURA ✔' : 'KILLAURA ❌'), 1);
+        showToast(killAuraEnabled ? 'Killaura ON' : 'Killaura OFF');
+    });
+    if (killAuraBtn) uiButtons.push(killAuraBtn);
+
+    const autoLootBtn = createButton('AUTO LOOT ❌', 60, 400, showWip);
+    if (autoLootBtn) uiButtons.push(autoLootBtn);
+
+    // Initially hide all buttons (shown when menu is opened)
+    for (const btn of uiButtons) {
+        if (btn && btn.nodePtr && !btn.nodePtr.isNull())
+            setPosition(btn.nodePtr, -1000, -1000);
+    }
+}
+
+// ─── Main initialisation ──────────────────────────────────────────────────────
+function initMod() {
+    'use strict';
+    cleanupAll();
+
+    gameBase = Module.findBaseAddress('libg.so');
+    if (!gameBase) {
+        console.log('libg.so not found!');
+        return;
+    }
+
+    // libc helpers
+    malloc = new NativeFunction(Module.getExportByName('libc.so', 'malloc'), 'pointer', ['uint']);
+    free   = new NativeFunction(Module.getExportByName('libc.so', 'free'),   'void',    ['pointer']);
+
+    // ── Game function offsets ────────────────────────────────────────────────
+    offsets = {
+        FIND_ENTITY_OFF:     11659572,
+        GET_PLAYER_LIST_OFF:  9463604,
+        SET_ENTITY_PARENT_OFF:7677284,
+        ALLOC_ENTITY_OFF:    11420908,
+        GET_COMPONENT_OFF:   10995228,
+        GET_ENTITY_TYPE_OFF: 10617980,
+        GET_ENTITY_SUBTYPE_OFF:10618108,
+        GET_ENTITY_TEAM_OFF: 10340096,
+        GET_POS_X_OFF:       10995948,
+        GET_POS_Y_OFF:       10995956,
+        GET_POS_Z_OFF:       10995964,
+        GET_ENTITY_HP_OFF:   10995864,
+        GET_ENTITY_OBJ_OFF:  11666556,
+        GET_ENTITY_ALIVE_OFF:11665620,
+        ENTITY_LIST_PTR_OFF: 17577720,
+        TOUCH_HANDLER_OFF:    8107136,
+        ON_TOUCH_EVENT_OFF:   8088720,
+        GET_ROOT_NODE_OFF:    5717712,
+        CREATE_STRING_OFF:   13968800,
+        SET_TOAST_OFF:        5720412,
+        ANTI_CHEAT_OFF:      10690108,
+        BTN_CLICK_OFF:       12421880,
+        ADD_TO_SCENE_OFF:    12319064,
+        SET_BTN_TEXT_OFF:     5746332,
+        INIT_COMPONENT_OFF:   5744716,
+        GET_CHILD_OFF:       12221696,
+        SET_TEXT_OFF:         9718956,
+        SET_POSITION_OFF:    12198532,
+        SET_BTN_TYPE_OFF:    12217964,
+        SET_VISIBLE_OFF:     12284116,
+        SET_IMAGE_OFF:       12425404,
+    };
+
+    // ── Resolve native functions ─────────────────────────────────────────────
+    entityListPtr  = gameBase.add(offsets.ENTITY_LIST_PTR_OFF).readPointer();
+    // (Note: UNK_C28 was the actual entityListPtr source offset — 18525472)
+
+    findObject     = new NativeFunction(gameBase.add(offsets.ALLOC_ENTITY_OFF /*UNK_C27*/), 'pointer', ['pointer', 'pointer']);
+    initComponent  = new NativeFunction(gameBase.add(offsets.INIT_COMPONENT_OFF), 'void',    ['pointer']);
+    getChildByName = new NativeFunction(gameBase.add(offsets.GET_CHILD_OFF),       'pointer', ['pointer', 'pointer']);
+    setTextContent = new NativeFunction(gameBase.add(offsets.SET_TEXT_OFF),         'void',    ['pointer', 'pointer', 'int', 'int']);
+    setButtonType  = new NativeFunction(gameBase.add(offsets.SET_BTN_TYPE_OFF),     'void',    ['pointer', 'int']);
+    setPosition    = new NativeFunction(gameBase.add(offsets.SET_POSITION_OFF),     'void',    ['pointer', 'float', 'float']);
+    addToScene     = new NativeFunction(gameBase.add(offsets.ADD_TO_SCENE_OFF),     'pointer', ['pointer', 'pointer']);
+    setButtonText  = new NativeFunction(gameBase.add(offsets.SET_BTN_TEXT_OFF),     'pointer', ['pointer', 'pointer', 'int']);
+    setVisible     = new NativeFunction(gameBase.add(offsets.SET_VISIBLE_OFF),      'void',    ['pointer', 'int']);
+    setImage       = new NativeFunction(gameBase.add(offsets.SET_IMAGE_OFF),        'void',    ['pointer', 'pointer', 'pointer']);
+
+    gameApi = {
+        getPlayerList:   new NativeFunction(gameBase.add(offsets.GET_PLAYER_LIST_OFF),  'pointer', []),
+        allocEntity:     new NativeFunction(gameBase.add(offsets.ALLOC_ENTITY_OFF),     'pointer', ['pointer', 'int']),
+        setEntityParent: new NativeFunction(gameBase.add(offsets.SET_ENTITY_PARENT_OFF),'void',    ['pointer', 'pointer']),
+        getComponent:    new NativeFunction(gameBase.add(offsets.GET_COMPONENT_OFF),    'pointer', ['pointer']),
+        getEntityType:   new NativeFunction(gameBase.add(offsets.GET_ENTITY_TYPE_OFF),  'uint32',  ['pointer']),
+        getEntitySubtype:new NativeFunction(gameBase.add(offsets.GET_ENTITY_SUBTYPE_OFF),'uint32', ['pointer']),
+        getEntityTeam:   new NativeFunction(gameBase.add(offsets.GET_ENTITY_TEAM_OFF),  'uint32',  ['pointer']),
+        getPosX:         new NativeFunction(gameBase.add(offsets.GET_POS_X_OFF),        'uint32',  ['pointer']),
+        getPosY:         new NativeFunction(gameBase.add(offsets.GET_POS_Y_OFF),        'uint32',  ['pointer']),
+        getEntityHp:     new NativeFunction(gameBase.add(offsets.GET_ENTITY_HP_OFF),    'uint32',  ['pointer']),
+        getEntityObj:    new NativeFunction(gameBase.add(offsets.GET_ENTITY_OBJ_OFF),   'pointer', ['pointer']),
+        isEntityAlive:   new NativeFunction(gameBase.add(offsets.GET_ENTITY_ALIVE_OFF), 'uint32',  ['pointer']),
+        getRootNodeFn:   new NativeFunction(gameBase.add(offsets.GET_ROOT_NODE_OFF),    'pointer', []),
+        createStringFn:  new NativeFunction(gameBase.add(offsets.CREATE_STRING_OFF),    'pointer', ['pointer', 'pointer']),
+        setToastFn:      new NativeFunction(gameBase.add(offsets.SET_TOAST_OFF),        'void',    ['pointer', 'pointer', 'float', 'int']),
+    };
+
+    getRootNode  = gameApi.getRootNodeFn;
+    createString = gameApi.createStringFn;
+    setToast     = gameApi.setToastFn;
+
+    // ── String utility helpers ───────────────────────────────────────────────
+    strUtils = {
+        // Allocate a raw C string in game memory (caller must free)
+        allocCString(str) {
+            const buf = malloc(str.length + 1);
+            Memory.writeUtf8String(buf, str);
+            return buf;
+        },
+        // Allocate a game engine String object (caller must free with free())
+        allocGameString(str) {
+            const cStr    = this.allocCString(str);
+            const gameStr = malloc(96);
+            createString(gameStr, cStr);
+            free(cStr);
+            return gameStr;
+        },
+    };
+
+    showToast = function(message) {
+        try {
+            const rootNode = getRootNode();
+            if (!rootNode || rootNode.isNull()) return;
+            const msgPtr = strUtils.allocGameString(message);
+            if (!msgPtr || msgPtr.isNull()) return;
+            setToast(rootNode, msgPtr, 0, -1);
+            free(msgPtr);
+        } catch (e) {}
+    };
+
+    // ── Anti-cheat bypass (UNLOCK feature) ───────────────────────────────────
+    const antiCheatAddr = gameBase.add(offsets.ANTI_CHEAT_OFF);
+    origAntiCheatCheck  = new NativeFunction(antiCheatAddr, 'bool', ['int64', 'pointer']);
+    Interceptor.replace(antiCheatAddr, new NativeCallback(function(arg0, arg1) {
+        if (unlockEnabled) return 1;   // always pass the check
+        return origAntiCheatCheck(arg0, arg1);
+    }, 'bool', ['int64', 'pointer']));
+
+    // ── AIMBOT — player-update interceptor ───────────────────────────────────
+    // Fires every frame for each entity; we use it to track localPlayer
+    const playerUpdateInterceptor = attachInterceptor(
+        gameBase.add(offsets.FIND_ENTITY_OFF), {
+        onEnter(args) {
+            try {
+                const player = args[0];
+                localPlayer = player;
+                if (!player || player.isNull()) return;
+
+                dodgeState.targetPtr = gameApi.getEntityObj(player);
+                dodgeState.targetId  = gameApi.isEntityAlive(player);
+
+                if (!dodgeState.targetPtr || dodgeState.targetPtr.isNull()
+                    || dodgeState.targetId === -1) return;
+                if (!dodgeState.dodgeActive) return;
+
+                const px        = gameApi.getPosX(dodgeState.targetPtr);
+                const py        = gameApi.getPosY(dodgeState.targetPtr);
+                const now       = Date.now();
+                updateAimVelocity(px, py, now);
+
+                if (dodgeState.isInactive || dodgeState.isDodging) return;
+
+                const comp    = gameApi.getComponent(dodgeState.targetPtr);
+                const team    = comp ? gameApi.getEntityTeam(comp) : 0;
+                const threats = getNearbyThreats();
+                const stale   = now - dodgeState.lastUpdateTime > cfg.VELOCITY_SMOOTH * 1000;
+
+                if (threats.length > 0 && stale) {
+                    const best = findBestDodgeDir(threats, px, py,
+                                                   dodgeState.velocity.vx, dodgeState.velocity.vy,
+                                                   team, false);
+                    if (best) onThreatDetected(best.x, best.y);
+                }
+            } catch (e) {}
+        }
+    });
+    activeInterceptors.push(playerUpdateInterceptor);
+
+    // ── AIMBOT — polling interval ─────────────────────────────────────────────
+    const aimbotInterval = setInterval(() => {
+        if (aimbotEnabled) findNearestEnemy();
+    }, 10);
+    activeIntervals.push(aimbotInterval);
+
+    // ── AIMBOT — touch event interceptor (deflects aim toward predicted pos) ──
+    const aimTouchInterceptor = attachInterceptor(
+        gameBase.add(offsets.ON_TOUCH_EVENT_OFF), {
+        onEnter(args) {
+            if (!aimbotEnabled || !aimbotActive || !localPlayer || localPlayer.isNull()) return;
+            const touchType = parseInt(args[6]);
+            if (touchType !== 0) return;   // only handle tap-down
+
+            const selfObj = gameApi.getEntityObj(localPlayer);
+            if (!selfObj || selfObj.isNull()) return;
+
+            findNearestEnemy();
+            if (!aimbotActive) return;
+
+            const selfX  = gameApi.getPosX(selfObj);
+            const selfY  = gameApi.getPosY(selfObj);
+            const dist   = Math.hypot(aimTargetX - selfX, aimTargetY - selfY);
+            const tof    = dist / 3255;  // time of flight (bullet speed ~3255 units/s)
+            const pred   = velocityTracker.predict(tof);
+
+            args[1] = ptr(Math.round(pred.x));
+            args[2] = ptr(Math.round(pred.y));
+        }
+    });
+    activeInterceptors.push(aimTouchInterceptor);
+
+    // ── KILLAURA — replace touch handler to always return "hit" ──────────────
+    const touchHandlerAddr = gameBase.add(offsets.TOUCH_HANDLER_OFF);
+    Interceptor.replace(touchHandlerAddr, new NativeCallback(function() {
+        if (killAuraEnabled && featureFlags.killAuraUnlocked) return 1;
+        return 0;
+    }, 'bool', []));
+
+    // ── KILLAURA — suppress event cancellation ────────────────────────────────
+    const killAuraTouchInterceptor = attachInterceptor(
+        gameBase.add(offsets.ON_TOUCH_EVENT_OFF), {
+        onEnter(args) {
+            if (!killAuraEnabled) return;
+            const touchType = parseInt(args[6]);
+            if (touchType === 1 && !featureFlags.aimbotUnlocked)
+                args[6] = ptr(-1);   // prevent the game from cancelling the hit
+        }
+    });
+    activeInterceptors.push(killAuraTouchInterceptor);
+
+    // ── Build the in-game UI and show the welcome toast ──────────────────────
+    setTimeout(() => {
+        buildUI();
+        showToast('Приветик юзер прекрасного ');
+        // "Hello user of the amazing mod "
+    }, 1000);
+    activeTimeouts.push(setTimeout);
+}
+
+// ─── Entry point: wait for libg.so then run ───────────────────────────────────
+(function waitForLibg() {
+    const pollInterval = setInterval(function() {
+        try {
+            const base = Module.findBaseAddress('libg.so');
+            if (base) {
+                clearInterval(pollInterval);
+                setTimeout(() => {
+                    try { initMod(); } catch (e) {}
+                }, 1000);
+            }
+        } catch (e) {}
+    }, 50);
+}());
