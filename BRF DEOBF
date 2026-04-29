@@ -1,0 +1,883 @@
+// BRF MOD deobfuscated
+let activeIntervals = [];
+let activeTimeouts = [];
+let activeHooks = [];
+
+function clearAllIntervals() {
+    for (let id of activeIntervals) clearInterval(id);
+    activeIntervals = [];
+}
+
+function clearAllTimeouts() {
+    for (let id of activeTimeouts) clearTimeout(id);
+    activeTimeouts = [];
+}
+
+function unloadScript() {
+    clearAllIntervals();
+    clearAllTimeouts();
+    for (let hook of activeHooks) {
+        try { hook.detach(); } catch (e) {}
+    }
+    activeHooks = [];
+}
+
+Script.bindWeak(this, function () {
+    unloadScript();
+    console.log("[*] Script unloaded, cleanup done.");
+});
+
+let isMenuOpen = false;
+let unlockEnabled = false;
+let aimbotEnabled = true;
+let autoLootEnabled = false;
+
+let isTargetFound = false;
+let targetX = 0;
+let targetY = 0;
+let aimbotInterval = null;
+
+let menuButtons = [];
+let menuMainBtn = null;
+let unlockBtn = null;
+let aimbotBtn = null;
+let dodgeBtn = null;
+let autoLootBtn = null;
+
+function initializeMod() {
+    "use strict";
+    unloadScript();
+
+    const libgBase = Module.findBaseAddress("libg.so");
+    if (!libgBase) {
+        console.log("libg.so not found!");
+        return;
+    }
+
+    const libcMalloc = new NativeFunction(Module.getExportByName("libc.so", "malloc"), "pointer", ["uint"]);
+    const libcFree = new NativeFunction(Module.getExportByName("libc.so", "free"), "void", ["pointer"]);
+
+    Interceptor.replace(libgBase.add(8098628), new NativeCallback(function (a, b) { return 1; }, "bool", ["int64", "pointer"]));
+    Interceptor.replace(libgBase.add(10125452), new NativeCallback(function (a) { return 0; }, "int64", ["int64"]));
+    
+    const Offsets = {
+        LogicBattleModeClient_update: 11659572,
+        BattleMode_getInstance: 9463604,
+        ClientInputManager_addInput: 7677284,
+        ClientInput_constructor_int: 11420908,
+        LogicGameObjectClient_getData: 10995228,
+        LogicProjectileData_getSpeed: 10617980,
+        LogicProjectileData_getRadius: 10618108,
+        LogicCharacterData_getCollisionRadius: 10340096,
+        LogicGameObjectClient_getX: 10995948,
+        LogicGameObjectClient_getY: 10995956,
+        LogicGameObjectClient_getGlobalID: 10995864,
+        LogicBattleModeClient_getOwnCharacter: 11666556,
+        LogicBattleModeClient_getOwnPlayerTeam: 11665620,
+        VTABLE_PROJECTILE_DATA: 17577720,
+        BattleScreen_getClosestTargetForAutoshoot: 8107136,
+        BattleScreen_activateSkill: 8088720,
+        Gui_getInstance: 5717712,
+        StringCtor: 13968800,
+        Gui_showFloaterTextAtDefaultPos: 5720412,
+        CanMoveAtSameTime: 10690108,
+        ButtonClickHook: 12421880,
+        StringTable_getMovieClip: 12032828,
+        Stage_instance: 18525472,
+        Stage_addChild: 12319064,
+        TextField_setText: 5746332,
+        GameButtonCtor: 5744716,
+        MovieClip_getTextFieldByName: 12221696,
+        MovieClipHelper_setTextAndScaleIfNecessary: 9718956,
+        DisplayObject_setXY: 12198532,
+        MovieClip_gotoAndStopFrameIndex: 12217964,
+        Sprite_Sprite: 12284116,
+        MovieClip_setText: 12425404
+    };
+
+    const StageInstancePtr = libgBase.add(Offsets.Stage_instance).readPointer();
+    const NativeFuncs = {
+        StringTable_getMovieClip: new NativeFunction(libgBase.add(Offsets.StringTable_getMovieClip), "pointer", ["pointer", "pointer"]),
+        GameButtonCtor: new NativeFunction(libgBase.add(Offsets.GameButtonCtor), "void", ["pointer"]),
+        MovieClip_getTextFieldByName: new NativeFunction(libgBase.add(Offsets.MovieClip_getTextFieldByName), "pointer", ["pointer", "pointer"]),
+        MovieClipHelper_setTextAndScale: new NativeFunction(libgBase.add(Offsets.MovieClipHelper_setTextAndScaleIfNecessary), "void", ["pointer", "pointer", "int", "int"]),
+        MovieClip_gotoAndStopFrameIndex: new NativeFunction(libgBase.add(Offsets.MovieClip_gotoAndStopFrameIndex), "void", ["pointer", "int"]),
+        DisplayObject_setXY: new NativeFunction(libgBase.add(Offsets.DisplayObject_setXY), "void", ["pointer", "float", "float"]),
+        Stage_addChild: new NativeFunction(libgBase.add(Offsets.Stage_addChild), "pointer", ["pointer", "pointer"]),
+        TextField_setText: new NativeFunction(libgBase.add(Offsets.TextField_setText), "pointer", ["pointer", "pointer", "int"])
+    };
+
+    const GameMethods = {
+        BattleMode_getInstance: new NativeFunction(libgBase.add(Offsets.BattleMode_getInstance), "pointer", []),
+        ClientInput_constructor_int: new NativeFunction(libgBase.add(Offsets.ClientInput_constructor_int), "pointer", ["pointer", "int"]),
+        ClientInputManager_addInput: new NativeFunction(libgBase.add(Offsets.ClientInputManager_addInput), "void", ["pointer", "pointer"]),
+        LogicGameObjectClient_getData: new NativeFunction(libgBase.add(Offsets.LogicGameObjectClient_getData), "pointer", ["pointer"]),
+        LogicProjectileData_getSpeed: new NativeFunction(libgBase.add(Offsets.LogicProjectileData_getSpeed), "uint32", ["pointer"]),
+        LogicProjectileData_getRadius: new NativeFunction(libgBase.add(Offsets.LogicProjectileData_getRadius), "uint32", ["pointer"]),
+        LogicCharacterData_getCollisionRadius: new NativeFunction(libgBase.add(Offsets.LogicCharacterData_getCollisionRadius), "uint32", ["pointer"]),
+        LogicGameObjectClient_getX: new NativeFunction(libgBase.add(Offsets.LogicGameObjectClient_getX), "uint32", ["pointer"]),
+        LogicGameObjectClient_getY: new NativeFunction(libgBase.add(Offsets.LogicGameObjectClient_getY), "uint32", ["pointer"]),
+        LogicGameObjectClient_getGlobalID: new NativeFunction(libgBase.add(Offsets.LogicGameObjectClient_getGlobalID), "uint32", ["pointer"]),
+        LogicBattleModeClient_getOwnCharacter: new NativeFunction(libgBase.add(Offsets.LogicBattleModeClient_getOwnCharacter), "pointer", ["pointer"]),
+        LogicBattleModeClient_getOwnPlayerTeam: new NativeFunction(libgBase.add(Offsets.LogicBattleModeClient_getOwnPlayerTeam), "uint32", ["pointer"]),
+        Gui_getInstance: new NativeFunction(libgBase.add(Offsets.Gui_getInstance), "pointer", []),
+        StringCtor: new NativeFunction(libgBase.add(Offsets.StringCtor), "pointer", ["pointer", "pointer"]),
+        Gui_showFloaterTextAtDefaultPos: new NativeFunction(libgBase.add(Offsets.Gui_showFloaterTextAtDefaultPos), "void", ["pointer", "pointer", "float", "int"])
+    };
+
+    let globalBattleModeClient = null;
+
+    const StringManager = {
+        createPtr: function (str) {
+            const ptr = libcMalloc(str.length + 1);
+            Memory.writeUtf8String(ptr, str);
+            return ptr;
+        },
+        createObject: function (str) {
+            const strPtr = StringManager.createPtr(str);
+            const strObj = libcMalloc(96);
+            GameMethods.StringCtor(strObj, strPtr);
+            libcFree(strPtr);
+            return strObj;
+        }
+    };
+
+    function showFloatingText(text) {
+        try {
+            const gui = GameMethods.Gui_getInstance();
+            if (!gui || gui.isNull()) return;
+            const strObj = StringManager.createObject(text);
+            if (!strObj || strObj.isNull()) return;
+            GameMethods.Gui_showFloaterTextAtDefaultPos(gui, strObj, 0, -1);
+            libcFree(strObj);
+        } catch (e) { console.log("[UI] showFloater error:", e); }
+    }
+
+    const CanMovePtr = libgBase.add(Offsets.CanMoveAtSameTime);
+    const originalCanMove = new NativeFunction(CanMovePtr, "bool", ["int64", "pointer"]);
+    Interceptor.replace(CanMovePtr, new NativeCallback(function (a, b) {
+        if (unlockEnabled) return 1;
+        return originalCanMove(a, b);
+    }, "bool", ["int64", "pointer"]));
+
+    function sendMovementInput(x, y) {
+        try {
+            if (!globalBattleModeClient || globalBattleModeClient.isNull()) return false;
+            const battleMode = GameMethods.BattleMode_getInstance();
+            if (!battleMode || battleMode.isNull()) return false;
+            const inputManager = battleMode.add(88).readPointer();
+            if (!inputManager || inputManager.isNull()) return false;
+            
+            const inputObj = libcMalloc(96);
+            if (!inputObj || inputObj.isNull()) return false;
+            
+            GameMethods.ClientInput_constructor_int(inputObj, 2);
+            inputObj.add(12).writeS32(x);
+            inputObj.add(16).writeS32(y);
+            GameMethods.ClientInputManager_addInput(inputManager, inputObj);
+            return true;
+        } catch (e) { return false; }
+    }
+
+    let dodgeState = {
+        ownCharacter: ptr(0), ownTeamId: -1, isDodging: false, forceMovementBlock: false,
+        projectiles: new Map(), projHistory: new Map(), lastDodgeTime: 0,
+        dodgeTimeout: null, postDodgeBlockTimer: null, movementInterval: null,
+        extendedDodgeTimer: null, active: true, currentDodge: {x: 0, y: 0},
+        lastPlayerPos: {x: 0, y: 0}, playerVelocity: {vx: 0, vy: 0}, lastPlayerUpdateTime: 0,
+        extendedDodgeActive: false, velocitySamples: [], lastExtendedDodgeTarget: {x: 0, y: 0},
+        extendedDodgeDirectionLock: false, stopMovementRequested: false
+    };
+
+    const dodgeConfig = {
+        DODGE_DISTANCE_BASE: 550, DODGE_DURATION: 500, PREDICTION_TIME: 1.8,
+        MIN_PROJECTILE_SPEED: 20, STALE_PROJECTILE_THRESHOLD: 1400, DODGE_COOLDOWN: 0.2,
+        COLLISION_MARGIN: 180, POST_DODGE_BLOCK: 100, HISTORY_SIZE: 4, MIN_MOVEMENT_FOR_ANGLE: 5,
+        DODGE_SAFETY_MARGIN: 350, PLAYER_SPEED_SMOOTHING: 0.6, EXTRA_DISTANCE_FACTOR: 2.5,
+        MAX_EXTRA_DISTANCE: 500, EXTENDED_DODGE_CHECK_INTERVAL: 80, MOVEMENT_CMD_INTERVAL: 10,
+        STRICT_PERPENDICULAR_SAFETY: 400, EXTENDED_DODGE_MAX_ANGLE_OFFSET: Math.PI / 6,
+        EXTENDED_DODGE_DIRECTION_CHANGE_THRESHOLD: 150
+    };
+
+    function calcTimeToCollision(proj, px, py, pvx, pvy, playerRadius) {
+        const relVx = Math.cos(proj.angle) * proj.speed - pvx;
+        const relVy = Math.sin(proj.angle) * proj.speed - pvy;
+        const dx = proj.x - px;
+        const dy = proj.y - py;
+        
+        const a = relVx * relVx + relVy * relVy;
+        const b = 2 * (dx * relVx + dy * relVy);
+        const radiusSum = proj.radius + playerRadius + dodgeConfig.COLLISION_MARGIN;
+        const c = dx * dx + dy * dy - radiusSum * radiusSum;
+        
+        if (c < 0) return 0;
+        if (a < 0.0001) {
+            if (Math.abs(b) < 0.0001) return Infinity;
+            const t = -c / b;
+            return t >= 0 ? t : Infinity;
+        }
+        
+        const discriminant = b * b - 4 * a * c;
+        if (discriminant < 0) return Infinity;
+        
+        const sqrtD = Math.sqrt(discriminant);
+        const t1 = (-b - sqrtD) / (2 * a);
+        if (t1 >= 0) return t1;
+        const t2 = (-b + sqrtD) / (2 * a);
+        return t2 >= 0 ? t2 : Infinity;
+    }
+
+    function calcApproachDistance(proj, px, py, pvx, pvy) {
+        const relVx = Math.cos(proj.angle) * proj.speed - pvx;
+        const relVy = Math.sin(proj.angle) * proj.speed - pvy;
+        const dx = proj.x - px;
+        const dy = proj.y - py;
+        
+        const denom = relVx * relVx + relVy * relVy;
+        if (denom < 0.0001) return {t: 0, distance: Math.hypot(dx, dy)};
+        
+        const t = Math.max(0, -(dx * relVx + dy * relVy) / denom);
+        const projFinalX = proj.x + Math.cos(proj.angle) * proj.speed * t;
+        const projFinalY = proj.y + Math.sin(proj.angle) * proj.speed * t;
+        const playerFinalX = px + pvx * t;
+        const playerFinalY = py + pvy * t;
+        
+        return {t: t, distance: Math.hypot(projFinalX - playerFinalX, projFinalY - playerFinalY)};
+    }
+
+    function updatePlayerVelocity(px, py, timestamp) {
+        if (dodgeState.lastPlayerUpdateTime > 0) {
+            const dt = (timestamp - dodgeState.lastPlayerUpdateTime) / 1000;
+            if (dt > 0.01) {
+                const vx = (px - dodgeState.lastPlayerPos.x) / dt;
+                const vy = (py - dodgeState.lastPlayerPos.y) / dt;
+                const smooth = 1 - dodgeConfig.PLAYER_SPEED_SMOOTHING;
+                dodgeState.playerVelocity.vx = smooth * vx + dodgeConfig.PLAYER_SPEED_SMOOTHING * dodgeState.playerVelocity.vx;
+                dodgeState.playerVelocity.vy = smooth * vy + dodgeConfig.PLAYER_SPEED_SMOOTHING * dodgeState.playerVelocity.vy;
+            }
+        } else {
+            dodgeState.playerVelocity.vx = 0;
+            dodgeState.playerVelocity.vy = 0;
+        }
+        dodgeState.lastPlayerPos.x = px;
+        dodgeState.lastPlayerPos.y = py;
+        dodgeState.lastPlayerUpdateTime = timestamp;
+    }
+
+    function getDangerousProjectiles() {
+        if (!globalBattleModeClient || globalBattleModeClient.isNull()) return [];
+        const manager = globalBattleModeClient.add(40).readPointer();
+        if (!manager || manager.isNull()) return [];
+        
+        const objCount = manager.add(12).readU32();
+        if (objCount === 0 || objCount > 2000) return [];
+        
+        const objArray = manager.readPointer();
+        if (!objArray || objArray.isNull()) return [];
+        
+        const now = Date.now();
+        const dangerous = [];
+        const currentIds = new Set();
+        
+        let px = 0, py = 0, pradius = 0;
+        const hasChar = dodgeState.ownCharacter && !dodgeState.ownCharacter.isNull();
+        if (hasChar) {
+            px = GameMethods.LogicGameObjectClient_getX(dodgeState.ownCharacter);
+            py = GameMethods.LogicGameObjectClient_getY(dodgeState.ownCharacter);
+            const data = GameMethods.LogicGameObjectClient_getData(dodgeState.ownCharacter);
+            pradius = data ? GameMethods.LogicCharacterData_getCollisionRadius(data) : 0;
+        }
+
+        for (let i = 0; i < objCount; i++) {
+            const obj = objArray.add(i * 8).readPointer();
+            if (!obj || obj.isNull()) continue;
+            
+            const data = GameMethods.LogicGameObjectClient_getData(obj);
+            if (!data || data.isNull()) continue;
+            
+            const vtable = data.readPointer();
+            if (!vtable.equals(libgBase.add(Offsets.VTABLE_PROJECTILE_DATA))) continue;
+            
+            const id = GameMethods.LogicGameObjectClient_getGlobalID(obj);
+            currentIds.add(id);
+            
+            const teamId = obj.add(64).readU32();
+            const isDead = obj.add(208).readU32();
+            if (teamId === dodgeState.ownTeamId || isDead !== 0) {
+                dodgeState.projectiles.delete(id);
+                dodgeState.projHistory.delete(id);
+                continue;
+            }
+            
+            const x = GameMethods.LogicGameObjectClient_getX(obj);
+            const y = GameMethods.LogicGameObjectClient_getY(obj);
+            const speed = GameMethods.LogicProjectileData_getSpeed(data);
+            const radius = GameMethods.LogicProjectileData_getRadius(data);
+            
+            let hist = dodgeState.projHistory.get(id);
+            if (!hist) {
+                hist = {positions: [], angle: undefined, speed: speed};
+                dodgeState.projHistory.set(id, hist);
+            }
+            
+            hist.positions.push({x, y, ts: now});
+            if (hist.positions.length > dodgeConfig.HISTORY_SIZE) hist.positions.shift();
+            
+            let angle = hist.angle;
+            let isCalculated = hist.angle !== undefined;
+            
+            if (hist.positions.length >= 2) {
+                const first = hist.positions[0];
+                const last = hist.positions[hist.positions.length - 1];
+                const dx = last.x - first.x;
+                const dy = last.y - first.y;
+                const dist = Math.hypot(dx, dy);
+                const dt = (last.ts - first.ts) / 1000;
+                
+                if (dist > dodgeConfig.MIN_MOVEMENT_FOR_ANGLE && dt > 0) {
+                    angle = Math.atan2(dy, dx);
+                    isCalculated = true;
+                    hist.angle = angle;
+                    const realSpeed = dist / dt;
+                    if (realSpeed > dodgeConfig.MIN_PROJECTILE_SPEED) hist.speed = realSpeed;
+                }
+            }
+            
+            const finalSpeed = hist.speed || speed;
+            dodgeState.projectiles.set(id, {x, y, speed: finalSpeed, radius, angle, calculated: isCalculated, lastSeen: now});
+            
+            if (isCalculated && finalSpeed > dodgeConfig.MIN_PROJECTILE_SPEED && hasChar) {
+                const proj = {x, y, speed: finalSpeed, radius, angle};
+                const approach = calcApproachDistance(proj, px, py, dodgeState.playerVelocity.vx, dodgeState.playerVelocity.vy);
+                const totalRadius = radius + pradius + dodgeConfig.COLLISION_MARGIN;
+                
+                if (approach.distance < totalRadius) {
+                    const ttc = calcTimeToCollision(proj, px, py, dodgeState.playerVelocity.vx, dodgeState.playerVelocity.vy, pradius);
+                    if (ttc < dodgeConfig.PREDICTION_TIME) {
+                        dangerous.push({id, x, y, speed: finalSpeed, radius, angle, ttc, approachDistance: approach.distance});
+                    }
+                }
+            }
+        }
+        
+        for (let [id, proj] of dodgeState.projectiles) {
+            if (!currentIds.has(id) || now - proj.lastSeen > dodgeConfig.STALE_PROJECTILE_THRESHOLD) {
+                dodgeState.projectiles.delete(id);
+                dodgeState.projHistory.delete(id);
+            }
+        }
+        
+        return dangerous;
+    }
+
+    function evalDodgeSafety(testAngle, dangerousProjs, px, py, pvx, pvy, dodgeDist) {
+        const destX = px + Math.cos(testAngle) * dodgeDist;
+        const destY = py + Math.sin(testAngle) * dodgeDist;
+        let minSqDist = Infinity;
+        const dodgeDurSec = dodgeConfig.DODGE_DURATION / 1000;
+        
+        for (let i = 0; i < dangerousProjs.length; i++) {
+            const p = dangerousProjs[i];
+            const pxAtT = p.x + Math.cos(p.angle) * p.speed * (p.ttc + dodgeDurSec);
+            const pyAtT = p.y + Math.sin(p.angle) * p.speed * (p.ttc + dodgeDurSec);
+            const dx = destX - pxAtT;
+            const dy = destY - pyAtT;
+            const sqDist = dx * dx + dy * dy;
+            if (sqDist < minSqDist) minSqDist = sqDist;
+        }
+        return Math.sqrt(minSqDist);
+    }
+
+    function calculateBestDodge(dangerousProjs, px, py, pvx, pvy, pradius, isExtended = false) {
+        if (dangerousProjs.length === 0) return null;
+        dangerousProjs.sort((a, b) => a.ttc - b.ttc);
+        const threat = dangerousProjs[0];
+        
+        const playerSpeed = Math.hypot(pvx, pvy);
+        let dodgeDist = dodgeConfig.DODGE_DISTANCE_BASE;
+        
+        if (playerSpeed > 10) {
+            const moveAngle = Math.atan2(pvy, pvx);
+            const threatToPlayerAngle = Math.atan2(threat.y - py, threat.x - px);
+            let diff = Math.abs((moveAngle - threatToPlayerAngle + Math.PI) % (2 * Math.PI) - Math.PI);
+            if (diff < Math.PI / 3) {
+                dodgeDist += Math.min(dodgeConfig.MAX_EXTRA_DISTANCE, playerSpeed * dodgeConfig.EXTRA_DISTANCE_FACTOR);
+            }
+        }
+        
+        const angle1 = threat.angle + Math.PI / 2;
+        const angle2 = threat.angle - Math.PI / 2;
+        const safety1 = evalDodgeSafety(angle1, dangerousProjs, px, py, pvx, pvy, dodgeDist);
+        const safety2 = evalDodgeSafety(angle2, dangerousProjs, px, py, pvx, pvy, dodgeDist);
+        
+        let bestAngle = null;
+        let maxSafety = -Infinity;
+        
+        if (safety1 >= dodgeConfig.STRICT_PERPENDICULAR_SAFETY || safety2 >= dodgeConfig.STRICT_PERPENDICULAR_SAFETY) {
+            bestAngle = safety1 >= safety2 ? angle1 : angle2;
+            maxSafety = Math.max(safety1, safety2);
+        } else {
+            const sweepLimit = isExtended ? dodgeConfig.EXTENDED_DODGE_MAX_ANGLE_OFFSET : Math.PI / 12;
+            const step = Math.PI / 24;
+            
+            for (let a = -sweepLimit; a <= sweepLimit; a += step) {
+                let test1 = angle1 + a;
+                let test2 = angle2 + a;
+                let s1 = evalDodgeSafety(test1, dangerousProjs, px, py, pvx, pvy, dodgeDist);
+                if (s1 > maxSafety) { maxSafety = s1; bestAngle = test1; }
+                let s2 = evalDodgeSafety(test2, dangerousProjs, px, py, pvx, pvy, dodgeDist);
+                if (s2 > maxSafety) { maxSafety = s2; bestAngle = test2; }
+            }
+            
+            if (maxSafety < dodgeConfig.DODGE_SAFETY_MARGIN) {
+                let avgX = 0, avgY = 0;
+                for (let i = 0; i < dangerousProjs.length; i++) {
+                    avgX += dangerousProjs[i].x;
+                    avgY += dangerousProjs[i].y;
+                }
+                const awayAngle = Math.atan2(py - avgY / dangerousProjs.length, px - avgX / dangerousProjs.length);
+                const sAway = evalDodgeSafety(awayAngle, dangerousProjs, px, py, pvx, pvy, dodgeDist);
+                if (sAway > maxSafety) { maxSafety = sAway; bestAngle = awayAngle; }
+            }
+        }
+        
+        if (bestAngle === null) return null;
+        return {
+            x: px + Math.cos(bestAngle) * dodgeDist, 
+            y: py + Math.sin(bestAngle) * dodgeDist, 
+            angle: bestAngle, 
+            distance: dodgeDist, 
+            safety: maxSafety
+        };
+    }
+
+    function stopMovement() {
+        if (dodgeState.movementInterval) {
+            clearInterval(dodgeState.movementInterval);
+            dodgeState.movementInterval = null;
+        }
+        dodgeState.stopMovementRequested = false;
+    }
+
+    function moveTo(x, y) {
+        stopMovement();
+        if (globalBattleModeClient && dodgeState.ownCharacter && !dodgeState.ownCharacter.isNull()) {
+            const px = GameMethods.LogicGameObjectClient_getX(dodgeState.ownCharacter);
+            const py = GameMethods.LogicGameObjectClient_getY(dodgeState.ownCharacter);
+            if (Math.pow(px - x, 2) + Math.pow(py - y, 2) > 25) {
+                sendMovementInput(x, y);
+            }
+        }
+        dodgeState.movementInterval = setInterval(() => {
+            if ((dodgeState.isDodging || dodgeState.extendedDodgeActive) && !dodgeState.stopMovementRequested) {
+                sendMovementInput(x, y);
+            } else {
+                stopMovement();
+            }
+        }, dodgeConfig.MOVEMENT_CMD_INTERVAL);
+        activeIntervals.push(dodgeState.movementInterval);
+    }
+
+    function checkExtendedDodge() {
+        if (!dodgeState.isDodging && !dodgeState.extendedDodgeActive) return;
+        
+        const px = GameMethods.LogicGameObjectClient_getX(dodgeState.ownCharacter);
+        const py = GameMethods.LogicGameObjectClient_getY(dodgeState.ownCharacter);
+        const data = GameMethods.LogicGameObjectClient_getData(dodgeState.ownCharacter);
+        const pradius = data ? GameMethods.LogicCharacterData_getCollisionRadius(data) : 0;
+        
+        const dangerous = getDangerousProjectiles();
+        if (dangerous.length === 0) {
+            if (dodgeState.extendedDodgeActive) {
+                dodgeState.extendedDodgeActive = false;
+                dodgeState.extendedDodgeDirectionLock = false;
+                dodgeState.stopMovementRequested = true;
+                stopMovement();
+                dodgeState.forceMovementBlock = false;
+            }
+            return;
+        }
+        
+        let stillInDanger = false;
+        for (let i = 0; i < dangerous.length; i++) {
+            if (calcTimeToCollision(dangerous[i], px, py, dodgeState.playerVelocity.vx, dodgeState.playerVelocity.vy, pradius) < 0.8) {
+                stillInDanger = true;
+                break;
+            }
+        }
+        
+        if (stillInDanger) {
+            if (!dodgeState.extendedDodgeActive) {
+                dodgeState.extendedDodgeActive = true;
+                dodgeState.forceMovementBlock = true;
+                dodgeState.extendedDodgeDirectionLock = false;
+            }
+            
+            const bestDodge = calculateBestDodge(dangerous, px, py, dodgeState.playerVelocity.vx, dodgeState.playerVelocity.vy, pradius, true);
+            if (bestDodge) {
+                let acceptNewAngle = true;
+                if (dodgeState.extendedDodgeDirectionLock && dodgeState.lastExtendedDodgeTarget.x !== 0) {
+                    const lockAngle = Math.atan2(dodgeState.lastExtendedDodgeTarget.y - py, dodgeState.lastExtendedDodgeTarget.x - px);
+                    const lockSafety = evalDodgeSafety(lockAngle, dangerous, px, py, dodgeState.playerVelocity.vx, dodgeState.playerVelocity.vy, pradius, dodgeConfig.DODGE_DISTANCE_BASE);
+                    if (bestDodge.safety < lockSafety + dodgeConfig.EXTENDED_DODGE_DIRECTION_CHANGE_THRESHOLD) {
+                        acceptNewAngle = false;
+                    }
+                }
+                if (acceptNewAngle) {
+                    dodgeState.lastExtendedDodgeTarget.x = bestDodge.x;
+                    dodgeState.lastExtendedDodgeTarget.y = bestDodge.y;
+                    dodgeState.extendedDodgeDirectionLock = true;
+                    moveTo(bestDodge.x, bestDodge.y);
+                }
+            }
+            
+            if (dodgeState.extendedDodgeTimer) clearTimeout(dodgeState.extendedDodgeTimer);
+            dodgeState.extendedDodgeTimer = setTimeout(checkExtendedDodge, dodgeConfig.EXTENDED_DODGE_CHECK_INTERVAL);
+            activeTimeouts.push(dodgeState.extendedDodgeTimer);
+        } else {
+            dodgeState.extendedDodgeActive = false;
+            dodgeState.extendedDodgeDirectionLock = false;
+            dodgeState.stopMovementRequested = true;
+            stopMovement();
+            dodgeState.forceMovementBlock = false;
+        }
+    }
+
+    function triggerDodge(targetX, targetY) {
+        dodgeState.stopMovementRequested = true;
+        stopMovement();
+        
+        if (dodgeState.forceMovementBlock && !dodgeState.isDodging && !dodgeState.extendedDodgeActive) {
+            if (dodgeState.postDodgeBlockTimer) {
+                clearTimeout(dodgeState.postDodgeBlockTimer);
+                dodgeState.postDodgeBlockTimer = null;
+            }
+            dodgeState.forceMovementBlock = false;
+        }
+        
+        if (dodgeState.isDodging || dodgeState.forceMovementBlock) return;
+        
+        if (dodgeState.dodgeTimeout) clearTimeout(dodgeState.dodgeTimeout);
+        if (dodgeState.postDodgeBlockTimer) clearTimeout(dodgeState.postDodgeBlockTimer);
+        if (dodgeState.extendedDodgeTimer) clearTimeout(dodgeState.extendedDodgeTimer);
+        
+        dodgeState.isDodging = true;
+        dodgeState.forceMovementBlock = true;
+        dodgeState.extendedDodgeActive = false;
+        dodgeState.extendedDodgeDirectionLock = false;
+        dodgeState.stopMovementRequested = false;
+        dodgeState.lastDodgeTime = Date.now();
+        dodgeState.currentDodge.x = targetX;
+        dodgeState.currentDodge.y = targetY;
+        
+        moveTo(targetX, targetY);
+        
+        dodgeState.dodgeTimeout = setTimeout(() => {
+            dodgeState.isDodging = false;
+            checkExtendedDodge();
+            if (!dodgeState.extendedDodgeActive) {
+                dodgeState.stopMovementRequested = true;
+                stopMovement();
+                dodgeState.postDodgeBlockTimer = setTimeout(() => {
+                    dodgeState.forceMovementBlock = false;
+                }, dodgeConfig.POST_DODGE_BLOCK);
+                activeTimeouts.push(dodgeState.postDodgeBlockTimer);
+            }
+        }, dodgeConfig.DODGE_DURATION);
+        activeTimeouts.push(dodgeState.dodgeTimeout);
+    }
+
+    const battleUpdateHook = Interceptor.attach(libgBase.add(Offsets.LogicBattleModeClient_update), {
+        onEnter(args) {
+            try {
+                const client = args[0];
+                globalBattleModeClient = client;
+                if (!client || client.isNull()) return;
+                
+                dodgeState.ownCharacter = GameMethods.LogicBattleModeClient_getOwnCharacter(client);
+                dodgeState.ownTeamId = GameMethods.LogicBattleModeClient_getOwnPlayerTeam(client);
+                
+                if (!dodgeState.ownCharacter || dodgeState.ownCharacter.isNull() || dodgeState.ownTeamId === -1) return;
+                if (!dodgeState.active) return;
+                
+                const px = GameMethods.LogicGameObjectClient_getX(dodgeState.ownCharacter);
+                const py = GameMethods.LogicGameObjectClient_getY(dodgeState.ownCharacter);
+                const now = Date.now();
+                updatePlayerVelocity(px, py, now);
+                
+                if (dodgeState.extendedDodgeActive || dodgeState.isDodging) return;
+                
+                const data = GameMethods.LogicGameObjectClient_getData(dodgeState.ownCharacter);
+                const pradius = data ? GameMethods.LogicCharacterData_getCollisionRadius(data) : 0;
+                
+                const dangerous = getDangerousProjectiles();
+                const cooldownOk = (now - dodgeState.lastDodgeTime) > (dodgeConfig.DODGE_COOLDOWN * 1000);
+                
+                if (dangerous.length > 0 && cooldownOk) {
+                    const best = calculateBestDodge(dangerous, px, py, dodgeState.playerVelocity.vx, dodgeState.playerVelocity.vy, pradius, false);
+                    if (best) triggerDodge(best.x, best.y);
+                }
+            } catch (e) {}
+        }
+    });
+    activeHooks.push(battleUpdateHook);
+
+    const Predictor = {
+        history: [], vx: 0, vy: 0, smoothing: 0.7, maxHistory: 5,
+        update(x, y) {
+            const now = Date.now();
+            this.history.push({x, y, time: now});
+            while (this.history.length > this.maxHistory) this.history.shift();
+            
+            if (this.history.length >= 2) {
+                const prev = this.history[this.history.length - 2];
+                const curr = this.history[this.history.length - 1];
+                const dt = (curr.time - prev.time) / 1000;
+                if (dt > 0.01) {
+                    const dx = (curr.x - prev.x) / dt;
+                    const dy = (curr.y - prev.y) / dt;
+                    this.vx = this.vx * this.smoothing + dx * (1 - this.smoothing);
+                    this.vy = this.vy * this.smoothing + dy * (1 - this.smoothing);
+                }
+            }
+        },
+        predict(flightTime) {
+            if (this.history.length < 2) return {x: targetX, y: targetY};
+            const speed = Math.hypot(this.vx, this.vy);
+            const last = this.history[this.history.length - 1];
+            if (speed < 30) return {x: last.x, y: last.y};
+            const maxT = Math.min(flightTime, 0.6);
+            return {x: last.x + this.vx * maxT, y: last.y + this.vy * maxT};
+        },
+        reset() {
+            this.history = []; this.vx = 0; this.vy = 0;
+        }
+    };
+
+    function findClosestTarget() {
+        try {
+            if (!globalBattleModeClient || globalBattleModeClient.isNull()) {
+                Predictor.reset(); isTargetFound = false; return;
+            }
+            const ownChar = GameMethods.LogicBattleModeClient_getOwnCharacter(globalBattleModeClient);
+            if (!ownChar || ownChar.isNull()) {
+                Predictor.reset(); isTargetFound = false; return;
+            }
+            const px = GameMethods.LogicGameObjectClient_getX(ownChar);
+            const py = GameMethods.LogicGameObjectClient_getY(ownChar);
+            const teamId = GameMethods.LogicBattleModeClient_getOwnPlayerTeam(globalBattleModeClient);
+            
+            const manager = globalBattleModeClient.add(40).readPointer();
+            if (!manager || manager.isNull()) { isTargetFound = false; return; }
+            const objCount = manager.add(12).readU32();
+            if (objCount === 0 || objCount > 2000) { isTargetFound = false; return; }
+            const objArray = manager.readPointer();
+            if (!objArray || objArray.isNull()) { isTargetFound = false; return; }
+            
+            let minDist = Infinity;
+            let found = false;
+            let bestX = 0, bestY = 0;
+            
+            for (let i = 0; i < objCount; i++) {
+                try {
+                    const obj = objArray.add(i * 8).readPointer();
+                    if (!obj || obj.isNull()) continue;
+                    
+                    const data = GameMethods.LogicGameObjectClient_getData(obj);
+                    if (!data || data.isNull()) continue;
+                    const vtable = data.readPointer();
+                    if (vtable && vtable.equals(libgBase.add(Offsets.VTABLE_PROJECTILE_DATA))) continue;
+                    
+                    const eTeam = obj.add(64).readU32();
+                    if (eTeam === teamId || eTeam === 0) continue;
+                    
+                    const isDead = obj.add(208).readU32();
+                    if (isDead !== 0) continue;
+                    
+                    const ex = GameMethods.LogicGameObjectClient_getX(obj);
+                    const ey = GameMethods.LogicGameObjectClient_getY(obj);
+                    const sqDist = (ex - px) * (ex - px) + (ey - py) * (ey - py);
+                    
+                    if (sqDist < minDist) {
+                        minDist = sqDist;
+                        bestX = ex;
+                        bestY = ey;
+                        found = true;
+                    }
+                } catch (e) { continue; }
+            }
+            
+            if (found) {
+                targetX = bestX;
+                targetY = bestY;
+                isTargetFound = true;
+                Predictor.update(targetX, targetY);
+                return true;
+            } else {
+                isTargetFound = false;
+                Predictor.reset();
+                return false;
+            }
+        } catch (e) {
+            isTargetFound = false;
+            Predictor.reset();
+            return false;
+        }
+    }
+
+    aimbotInterval = setInterval(() => {
+        if (aimbotEnabled) findClosestTarget();
+    }, 10);
+    activeIntervals.push(aimbotInterval);
+
+    const aimSkillHook = Interceptor.attach(libgBase.add(Offsets.BattleScreen_activateSkill), {
+        onEnter(args) {
+            if (!aimbotEnabled || !isTargetFound || !globalBattleModeClient || globalBattleModeClient.isNull()) return;
+            const skillType = parseInt(args[6]);
+            if (skillType !== 0) return;
+            
+            const ownChar = GameMethods.LogicBattleModeClient_getOwnCharacter(globalBattleModeClient);
+            if (!ownChar || ownChar.isNull()) return;
+            
+            findClosestTarget();
+            if (!isTargetFound) return;
+            
+            const px = GameMethods.LogicGameObjectClient_getX(ownChar);
+            const py = GameMethods.LogicGameObjectClient_getY(ownChar);
+            const dist = Math.hypot(targetX - px, targetY - py);
+            const projSpeed = 3255;
+            const flightTime = dist / projSpeed;
+            const predicted = Predictor.predict(flightTime);
+            
+            args[1] = ptr(Math.round(predicted.x));
+            args[2] = ptr(Math.round(predicted.y));
+        }
+    });
+    activeHooks.push(aimSkillHook);
+
+    function createButton(text, x, y, callback, styleIndex = 2) {
+        try {
+            const btnObj = Memory.alloc(528);
+            const scPtr = StringManager.createPtr("sc/ui.sc");
+            const btnNamePtr = StringManager.createPtr("map_editor_exit_button");
+            const movieClip = NativeFuncs.StringTable_getMovieClip(scPtr, btnNamePtr);
+            
+            if (!movieClip || movieClip.isNull()) {
+                libcFree(scPtr); libcFree(btnNamePtr); return null;
+            }
+            
+            NativeFuncs.GameButtonCtor(btnObj);
+            new NativeFunction(btnObj.readPointer().add(360).readPointer(), "void", ["pointer", "pointer", "bool"])(btnObj, movieClip, 1);
+            
+            const txtObj = StringManager.createObject(text);
+            NativeFuncs.TextField_setText(btnObj, txtObj, 1);
+            
+            const tfNamePtr = StringManager.createPtr("Text");
+            const textField = NativeFuncs.MovieClip_getTextFieldByName(movieClip, tfNamePtr);
+            libcFree(tfNamePtr);
+            
+            if (textField && !textField.isNull()) {
+                NativeFuncs.MovieClipHelper_setTextAndScale(textField, txtObj, 0, 0);
+            }
+            
+            NativeFuncs.MovieClip_gotoAndStopFrameIndex(movieClip, styleIndex);
+            NativeFuncs.DisplayObject_setXY(btnObj, x, y);
+            NativeFuncs.Stage_addChild(StageInstancePtr, btnObj);
+            
+            const clickHook = Interceptor.attach(libgBase.add(Offsets.ButtonClickHook), {
+                onEnter(args) {
+                    if (btnObj.toInt32() === args[0].toInt32()) callback();
+                }
+            });
+            activeHooks.push(clickHook);
+            
+            libcFree(scPtr); libcFree(btnNamePtr); libcFree(txtObj);
+            return {button: btnObj, textObj: txtObj, movieClip: movieClip, originalX: x, originalY: y};
+        } catch (e) { return null; }
+    }
+
+    function toggleMenu() {
+        isMenuOpen = !isMenuOpen;
+        const stateText = isMenuOpen ? "HIDE" : "MENU";
+        if (menuMainBtn && menuMainBtn.button && !menuMainBtn.button.isNull()) {
+            NativeFuncs.TextField_setText(menuMainBtn.button, StringManager.createObject(stateText), 1);
+        }
+        
+        for (let btn of menuButtons) {
+            if (btn && btn.button && !btn.button.isNull()) {
+                if (isMenuOpen) {
+                    NativeFuncs.DisplayObject_setXY(btn.button, btn.originalX, btn.originalY);
+                } else {
+                    NativeFuncs.DisplayObject_setXY(btn.button, -1000, -1000);
+                }
+            }
+        }
+        showFloatingText(isMenuOpen ? "Menu opened" : "Menu closed");
+    }
+
+    function buildUI() {
+        menuMainBtn = createButton("MENU", 60, 100, function () { toggleMenu(); });
+        
+        unlockBtn = createButton("UNLOCK❌", 60, 200, function () {
+            unlockEnabled = !unlockEnabled;
+            if (unlockBtn && unlockBtn.button) {
+                NativeFuncs.TextField_setText(unlockBtn.button, StringManager.createObject(unlockEnabled ? "UNLOCK✔" : "UNLOCK❌"), 1);
+            }
+            showFloatingText(unlockEnabled ? "t.me/BRFMod✔" : "t.me/BRFMod❌");
+        });
+        if (unlockBtn) menuButtons.push(unlockBtn);
+        
+        aimbotBtn = createButton("AIMBOT✔", 60, 250, function () {
+            aimbotEnabled = !aimbotEnabled;
+            if (aimbotBtn && aimbotBtn.button) {
+                NativeFuncs.TextField_setText(aimbotBtn.button, StringManager.createObject(aimbotEnabled ? "AIMBOT✔" : "AIMBOT❌"), 1);
+            }
+            showFloatingText(aimbotEnabled ? "t.me/BRFMod✔" : "t.me/BRFMod❌");
+            if (!aimbotEnabled) { isTargetFound = false; targetX = 0; targetY = 0; Predictor.reset(); }
+        });
+        if (aimbotBtn) menuButtons.push(aimbotBtn);
+        
+        dodgeBtn = createButton("DODGE✔", 60, 300, function () {
+            dodgeState.active = !dodgeState.active;
+            if (dodgeBtn && dodgeBtn.button) {
+                NativeFuncs.TextField_setText(dodgeBtn.button, StringManager.createObject(dodgeState.active ? "DODGE✔" : "DODGE❌"), 1);
+            }
+            showFloatingText(dodgeState.active ? "t.me/BRFMod✔" : "t.me/BRFMod❌");
+        });
+        if (dodgeBtn) menuButtons.push(dodgeBtn);
+        
+        autoLootBtn = createButton("AUTO LOOT❌", 60, 350, function () {
+            showFloatingText("En cours de développement");
+        });
+        if (autoLootBtn) menuButtons.push(autoLootBtn);
+        
+        for (let btn of menuButtons) {
+            if (btn && btn.button && !btn.button.isNull()) NativeFuncs.DisplayObject_setXY(btn.button, -1000, -1000);
+        }
+    }
+
+    setTimeout(() => {
+        buildUI();
+        showFloatingText("Bienvenue sur le Mod par t.me/BRFMod");
+    }, 1000);
+}
+
+(function () {
+    function waitForLibrary(libName, callback) {
+        const intervalId = setInterval(function () {
+            try {
+                const baseAddr = Module.findBaseAddress(libName);
+                if (baseAddr) {
+                    clearInterval(intervalId);
+                    setTimeout(function () { callback(baseAddr); }, 1000);
+                }
+            } catch (e) {}
+        }, 50);
+    }
+
+    waitForLibrary("libg.so", function (baseAddress) {
+        try {
+            initializeMod();
+        } catch (e) {}
+    });
+}());
