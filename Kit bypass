@@ -1,0 +1,38 @@
+//kit bypass
+
+const base = Module.findBaseAddress('libg.so');
+
+const LogicCharacterClient_isMovementDisabled         = base.add(0x0); 
+const LogicCharacterClient_canAttack                  = base.add(0x0);
+const LogicCharacterClient_isStunned                  = base.add(0x0);
+const LogicCharacterClient_isKnockedBack              = base.add(0x0);
+const LogicCharacterClient_isAttachedToEntity         = base.add(0x0);
+const LogicCharacterClient_isUnderStatusEffect        = base.add(0x0);
+const LogicInputManager_canSendInput                  = base.add(0x0);
+const LogicCharacterClient_shouldShowMovementJoystick = base.add(0x0);
+
+Interceptor.replace(LogicCharacterClient_isUnderStatusEffect, new NativeCallback(function(instance, effectType) {
+    return 0; 
+}, 'int', ['pointer', 'int']));
+
+Interceptor.replace(LogicCharacterClient_isMovementDisabled, new NativeCallback(function(instance) {
+    return 0;
+}, 'int', ['pointer']));
+
+Interceptor.replace(LogicCharacterClient_isAttachedToEntity, new NativeCallback(function(instance) {
+    return 0;
+}, 'int', ['pointer']));
+
+Interceptor.replace(LogicCharacterClient_canAttack, new NativeCallback(function(instance) {
+    return 1;
+}, 'int', ['pointer']));
+
+Interceptor.replace(LogicInputManager_canSendInput, new NativeCallback(function(instance) {
+    return 1;
+}, 'int', ['pointer']));
+
+Interceptor.replace(LogicCharacterClient_isKnockedBack, new NativeCallback(function(instance) {
+    return 0; 
+}, 'int', ['pointer']));
+
+console.log("Active...");
