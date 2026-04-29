@@ -1,0 +1,345 @@
+//follow closest teamate ok
+
+let activeIntervals = [];
+let activeTimeouts = [];
+let activeHooks = [];
+
+function clearAllIntervals() {
+    for (let id of activeIntervals) clearInterval(id);
+    activeIntervals = [];
+}
+
+function clearAllTimeouts() {
+    for (let id of activeTimeouts) clearTimeout(id);
+    activeTimeouts = [];
+}
+
+function unloadScript() {
+    clearAllIntervals();
+    clearAllTimeouts();
+    for (let hook of activeHooks) {
+        try { hook.detach(); } catch (e) {}
+    }
+    activeHooks = [];
+}
+
+Script.bindWeak(this, function () {
+    unloadScript();
+    console.log("[*] Script unloaded");
+});
+
+let isMenuOpen = false;
+let followEnabled = true;
+let followInterval = null;
+let currentFollowTarget = null;
+
+let menuButtons = [];
+let menuMainBtn = null;
+let followBtn = null;
+
+function initializeMod() {
+    "use strict";
+    unloadScript();
+
+    const libgBase = Module.findBaseAddress("libg.so");
+    if (!libgBase) {
+        console.log("libg.so not found!");
+        return;
+    }
+
+    const libcMalloc = new NativeFunction(Module.getExportByName("libc.so", "malloc"), "pointer", ["uint"]);
+    const libcFree = new NativeFunction(Module.getExportByName("libc.so", "free"), "void", ["pointer"]);
+
+    const Offsets = {
+        LogicBattleModeClient_update: 0x0,
+        BattleMode_getInstance: 0x0,
+        ClientInputManager_addInput: 0x0,
+        ClientInput_constructor_int: 0x0,
+        LogicGameObjectClient_getData: 0x0,
+        LogicCharacterData_getCollisionRadius: 0x0,
+        LogicGameObjectClient_getX: 0x0,
+        LogicGameObjectClient_getY: 0x0,
+        LogicGameObjectClient_getGlobalID: 0x0,
+        LogicBattleModeClient_getOwnCharacter: 0x0,
+        LogicBattleModeClient_getOwnPlayerTeam: 0x0,
+        VTABLE_PROJECTILE_DATA: 0x0,
+        StringTable_getMovieClip: 0x0,
+        GameButtonCtor: 0x0,
+        TextField_setText: 0x0,
+        MovieClip_getTextFieldByName: 0x0,
+        MovieClipHelper_setTextAndScaleIfNecessary: 0x0,
+        MovieClip_gotoAndStopFrameIndex: 0x0,
+        DisplayObject_setXY: 0x0,
+        Stage_addChild: 0x0,
+        Stage_instance: 0x0,
+        ButtonClickHook: 0x0
+    };
+
+    const StageInstancePtr = libgBase.add(Offsets.Stage_instance).readPointer();
+    
+    const NativeFuncs = {
+        StringTable_getMovieClip: new NativeFunction(libgBase.add(Offsets.StringTable_getMovieClip), "pointer", ["pointer", "pointer"]),
+        GameButtonCtor: new NativeFunction(libgBase.add(Offsets.GameButtonCtor), "void", ["pointer"]),
+        TextField_setText: new NativeFunction(libgBase.add(Offsets.TextField_setText), "pointer", ["pointer", "pointer", "int"]),
+        MovieClip_getTextFieldByName: new NativeFunction(libgBase.add(Offsets.MovieClip_getTextFieldByName), "pointer", ["pointer", "pointer"]),
+        MovieClipHelper_setTextAndScale: new NativeFunction(libgBase.add(Offsets.MovieClipHelper_setTextAndScaleIfNecessary), "void", ["pointer", "pointer", "int", "int"]),
+        MovieClip_gotoAndStopFrameIndex: new NativeFunction(libgBase.add(Offsets.MovieClip_gotoAndStopFrameIndex), "void", ["pointer", "int"]),
+        DisplayObject_setXY: new NativeFunction(libgBase.add(Offsets.DisplayObject_setXY), "void", ["pointer", "float", "float"]),
+        Stage_addChild: new NativeFunction(libgBase.add(Offsets.Stage_addChild), "pointer", ["pointer", "pointer"])
+    };
+
+    const GameMethods = {
+        BattleMode_getInstance: new NativeFunction(libgBase.add(Offsets.BattleMode_getInstance), "pointer", []),
+        ClientInput_constructor_int: new NativeFunction(libgBase.add(Offsets.ClientInput_constructor_int), "pointer", ["pointer", "int"]),
+        ClientInputManager_addInput: new NativeFunction(libgBase.add(Offsets.ClientInputManager_addInput), "void", ["pointer", "pointer"]),
+        LogicGameObjectClient_getData: new NativeFunction(libgBase.add(Offsets.LogicGameObjectClient_getData), "pointer", ["pointer"]),
+        LogicCharacterData_getCollisionRadius: new NativeFunction(libgBase.add(Offsets.LogicCharacterData_getCollisionRadius), "uint32", ["pointer"]),
+        LogicGameObjectClient_getX: new NativeFunction(libgBase.add(Offsets.LogicGameObjectClient_getX), "uint32", ["pointer"]),
+        LogicGameObjectClient_getY: new NativeFunction(libgBase.add(Offsets.LogicGameObjectClient_getY), "uint32", ["pointer"]),
+        LogicGameObjectClient_getGlobalID: new NativeFunction(libgBase.add(Offsets.LogicGameObjectClient_getGlobalID), "uint32", ["pointer"]),
+        LogicBattleModeClient_getOwnCharacter: new NativeFunction(libgBase.add(Offsets.LogicBattleModeClient_getOwnCharacter), "pointer", ["pointer"]),
+        LogicBattleModeClient_getOwnPlayerTeam: new NativeFunction(libgBase.add(Offsets.LogicBattleModeClient_getOwnPlayerTeam), "uint32", ["pointer"])
+    };
+
+    let globalBattleModeClient = null;
+
+    const StringManager = {
+        createPtr: function (str) {
+            const ptr = libcMalloc(str.length + 1);
+            Memory.writeUtf8String(ptr, str);
+            return ptr;
+        },
+        createObject: function (str) {
+            const strPtr = StringManager.createPtr(str);
+            const strObj = libcMalloc(96);
+            libcFree(strPtr);
+            return strObj;
+        }
+    };
+
+    function showFloatingText(text) {
+        console.log("[Follow] " + text);
+    }
+
+    function sendMovementInput(x, y) {
+        try {
+            if (!globalBattleModeClient || globalBattleModeClient.isNull()) return false;
+            const battleMode = GameMethods.BattleMode_getInstance();
+            if (!battleMode || battleMode.isNull()) return false;
+            const inputManager = battleMode.add(88).readPointer();
+            if (!inputManager || inputManager.isNull()) return false;
+            
+            const inputObj = libcMalloc(96);
+            if (!inputObj || inputObj.isNull()) return false;
+            
+            GameMethods.ClientInput_constructor_int(inputObj, 2);
+            inputObj.add(12).writeS32(x);
+            inputObj.add(16).writeS32(y);
+            GameMethods.ClientInputManager_addInput(inputManager, inputObj);
+            return true;
+        } catch (e) { return false; }
+    }
+
+    function findClosestAlly() {
+        try {
+            if (!globalBattleModeClient || globalBattleModeClient.isNull()) return null;
+            
+            const ownChar = GameMethods.LogicBattleModeClient_getOwnCharacter(globalBattleModeClient);
+            if (!ownChar || ownChar.isNull()) return null;
+            
+            const ownTeamId = GameMethods.LogicBattleModeClient_getOwnPlayerTeam(globalBattleModeClient);
+            const px = GameMethods.LogicGameObjectClient_getX(ownChar);
+            const py = GameMethods.LogicGameObjectClient_getY(ownChar);
+            
+            const manager = globalBattleModeClient.add(40).readPointer();
+            if (!manager || manager.isNull()) return null;
+            
+            const objCount = manager.add(12).readU32();
+            if (objCount === 0 || objCount > 2000) return null;
+            
+            const objArray = manager.readPointer();
+            if (!objArray || objArray.isNull()) return null;
+            
+            let closestAlly = null;
+            let minDist = Infinity;
+            let ownId = GameMethods.LogicGameObjectClient_getGlobalID(ownChar);
+            
+            for (let i = 0; i < objCount; i++) {
+                try {
+                    const obj = objArray.add(i * 8).readPointer();
+                    if (!obj || obj.isNull()) continue;
+                    
+                    const objId = GameMethods.LogicGameObjectClient_getGlobalID(obj);
+                    if (objId === ownId) continue;
+                    
+                    const data = GameMethods.LogicGameObjectClient_getData(obj);
+                    if (!data || data.isNull()) continue;
+                    
+                    const vtable = data.readPointer();
+                    if (vtable && vtable.equals(libgBase.add(Offsets.VTABLE_PROJECTILE_DATA))) continue;
+                    
+                    const teamId = obj.add(64).readU32();
+                    if (teamId !== ownTeamId) continue;
+                    
+                    const isDead = obj.add(208).readU32();
+                    if (isDead !== 0) continue;
+                    
+                    const isPet = obj.add(300).readU32();
+                    if (isPet === 1) continue;
+                    
+                    const x = GameMethods.LogicGameObjectClient_getX(obj);
+                    const y = GameMethods.LogicGameObjectClient_getY(obj);
+                    const dist = Math.hypot(x - px, y - py);
+                    
+                    if (dist < minDist && dist > 50) {
+                        minDist = dist;
+                        closestAlly = { id: objId, x: x, y: y, dist: dist };
+                    }
+                } catch (e) { continue; }
+            }
+            
+            if (closestAlly) {
+                console.log(`[Follow] Closest ally ID:${closestAlly.id} at (${Math.round(closestAlly.x)}, ${Math.round(closestAlly.y)}) dist:${Math.round(closestAlly.dist)}`);
+            }
+            
+            return closestAlly;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function followAlly() {
+        if (!followEnabled) return;
+        
+        const target = findClosestAlly();
+        if (!target) {
+            if (currentFollowTarget) {
+                console.log("[Follow] No ally found to follow");
+                currentFollowTarget = null;
+            }
+            return;
+        }
+        
+        currentFollowTarget = target;
+        sendMovementInput(target.x, target.y);
+    }
+
+    followInterval = setInterval(() => {
+        followAlly();
+    }, 50);
+    activeIntervals.push(followInterval);
+
+    const battleUpdateHook = Interceptor.attach(libgBase.add(Offsets.LogicBattleModeClient_update), {
+        onEnter(args) {
+            try {
+                const client = args[0];
+                globalBattleModeClient = client;
+            } catch (e) {}
+        }
+    });
+    activeHooks.push(battleUpdateHook);
+
+    function createButton(text, x, y, callback, styleIndex = 2) {
+        try {
+            const btnObj = Memory.alloc(528);
+            const scPtr = StringManager.createPtr("sc/ui.sc");
+            const btnNamePtr = StringManager.createPtr("map_editor_exit_button");
+            const movieClip = NativeFuncs.StringTable_getMovieClip(scPtr, btnNamePtr);
+            
+            if (!movieClip || movieClip.isNull()) {
+                libcFree(scPtr); libcFree(btnNamePtr); return null;
+            }
+            
+            NativeFuncs.GameButtonCtor(btnObj);
+            
+            const txtObj = StringManager.createObject(text);
+            NativeFuncs.TextField_setText(btnObj, txtObj, 1);
+            
+            const tfNamePtr = StringManager.createPtr("Text");
+            const textField = NativeFuncs.MovieClip_getTextFieldByName(movieClip, tfNamePtr);
+            libcFree(tfNamePtr);
+            
+            if (textField && !textField.isNull()) {
+                NativeFuncs.MovieClipHelper_setTextAndScale(textField, txtObj, 0, 0);
+            }
+            
+            NativeFuncs.MovieClip_gotoAndStopFrameIndex(movieClip, styleIndex);
+            NativeFuncs.DisplayObject_setXY(btnObj, x, y);
+            NativeFuncs.Stage_addChild(StageInstancePtr, btnObj);
+            
+            const clickHook = Interceptor.attach(libgBase.add(Offsets.ButtonClickHook), {
+                onEnter(args) {
+                    if (btnObj.toInt32() === args[0].toInt32()) callback();
+                }
+            });
+            activeHooks.push(clickHook);
+            
+            libcFree(scPtr); libcFree(btnNamePtr);
+            return {button: btnObj, textObj: txtObj, movieClip: movieClip, originalX: x, originalY: y};
+        } catch (e) { return null; }
+    }
+
+    function toggleMenu() {
+        isMenuOpen = !isMenuOpen;
+        const stateText = isMenuOpen ? "HIDE" : "MENU";
+        if (menuMainBtn && menuMainBtn.button && !menuMainBtn.button.isNull()) {
+            NativeFuncs.TextField_setText(menuMainBtn.button, StringManager.createObject(stateText), 1);
+        }
+        
+        for (let btn of menuButtons) {
+            if (btn && btn.button && !btn.button.isNull()) {
+                if (isMenuOpen) {
+                    NativeFuncs.DisplayObject_setXY(btn.button, btn.originalX, btn.originalY);
+                } else {
+                    NativeFuncs.DisplayObject_setXY(btn.button, -1000, -1000);
+                }
+            }
+        }
+        showFloatingText(isMenuOpen ? "Menu opened" : "Menu closed");
+    }
+
+    function buildUI() {
+        menuMainBtn = createButton("MENU", 60, 100, function () { toggleMenu(); });
+        
+        followBtn = createButton("FOLLOW✔", 60, 200, function () {
+            followEnabled = !followEnabled;
+            if (followBtn && followBtn.button) {
+                NativeFuncs.TextField_setText(followBtn.button, StringManager.createObject(followEnabled ? "FOLLOW✔" : "FOLLOW❌"), 1);
+            }
+            showFloatingText(followEnabled ? "Follow Ally ON" : "Follow Ally OFF");
+            if (!followEnabled) {
+                currentFollowTarget = null;
+            }
+        });
+        if (followBtn) menuButtons.push(followBtn);
+        
+        for (let btn of menuButtons) {
+            if (btn && btn.button && !btn.button.isNull()) NativeFuncs.DisplayObject_setXY(btn.button, -1000, -1000);
+        }
+    }
+
+    setTimeout(() => {
+        buildUI();
+        showFloatingText("Ally Follow Mod Loaded");
+    }, 1000);
+}
+
+(function () {
+    function waitForLibrary(libName, callback) {
+        const intervalId = setInterval(function () {
+            try {
+                const baseAddr = Module.findBaseAddress(libName);
+                if (baseAddr) {
+                    clearInterval(intervalId);
+                    setTimeout(function () { callback(baseAddr); }, 1000);
+                }
+            } catch (e) {}
+        }, 50);
+    }
+
+    waitForLibrary("libg.so", function (baseAddress) {
+        try {
+            initializeMod();
+        } catch (e) {}
+    });
+}());
