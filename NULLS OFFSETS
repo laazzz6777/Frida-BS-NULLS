@@ -1,0 +1,99 @@
+// offsets Nulls Brawl v66(maybe idk)
+
+const OFFSETS = {
+    // GameObject getters
+    LogicGameObjectClient_getX: 0xA86AB4,
+    LogicGameObjectClient_getY: 0xA86ABC,
+    LogicGameObjectClient_getGlobalID: 0xA86A60,
+    LogicGameObjectClient_getData: 0xA86A58,
+    
+    // Character velocity
+    LogicCharacterClient_getVelocityX: 0xB1EB5C,
+    LogicCharacterClient_getVelocityY: 0xB1EB64,
+    LogicCharacterClient_isAlive: 0xB1FFC8,
+    
+    // Projectile data
+    LogicProjectileData_getSpeed: 0x9F0C5C,
+    LogicProjectileData_getRadius: 0x9F0EFC,
+    LogicProjectileData_getAngle: 0x9F0EF0,
+    
+    // Character data
+    LogicCharacterData_getCollisionRadius: 0x9B0C18,
+    LogicCharacterData_getProjectileSpeed: 0x9B0D54,
+    LogicCharacterData_getRange: 0x9B0918,
+    
+    // Battle mode client
+    LogicBattleModeClient_getOwnCharacter: 0xB20614,
+    LogicBattleModeClient_getOwnPlayerTeam: 0xB20630,
+    LogicBattleModeClient_setClientPredictionMoveTo: 0xB20830,
+    LogicBattleModeClient_isWallBetween: 0xCC6328,
+    LogicBattleModeClient_update: 0xBF9514,
+    
+    // Map
+    LogicMap_getTile: 0xB76194,
+    LogicMap_isWall: 0xB7619C,
+    LogicMap_isWater: 0xB761A4,
+    LogicMap_isBush: 0xB761AC,
+    LogicMap_isWallAt: 0xB761B4,
+    
+    // Singleton getters
+    BattleMode_getInstance: 0xB53CD4,
+    
+    // Input
+    ClientInputManager_addInput: 0x4B1EAC,
+    ClientInput_constructor_int: 0xB30620,
+    InputMgrOffset: 0x11A20E8,
+    
+    // UI / Stage
+    Stage_Instance: 0x011A59B8,
+    Stage_addChild: 0xBA7DA8,
+    GameButton_GameButton: 0x57C0A8,
+    StringTable_getMovieClip: 0x49DA60,
+    gotoAndStop: 0x6DBBC0,
+    StringCtor: 0xD52880,
+    CustomButton_buttonPressed: 0xA06EFC,
+    GameMain_loadAsset: 0x49E11C,
+    TextField_setText: 0x57AE9C,
+    DisplayObject_setPixelSnappedXY: 0xBA2284,
+    dropGUIContainer_DropGUIContainer: 0x57BC80,
+    Sprite_Sprite: 0xBB7148,
+    
+    // Battle screen
+    BattleScreen_activateSkill: 0x907578,
+    BattleScreen_updateMovement: 0x541CD4,
+    
+    // Projectile target
+    LogicProjectile_getTargetPos: 0xA11754,
+    LogicProjectile_getRotation: 0xA117C8,
+    
+    // Character aim
+    LogicCharacterClient_getTargetAngle: 0xB1EB54,
+    LogicCharacterClient_getWeaponRange: 0xB2008C,
+    LogicCharacterClient_getAttackAngle: 0xB20094,
+    
+    // Anti-cheat (for bypass)
+    LogicChecksum_verify: 0x6FAC60,
+    LogicAttestest_collect: 0x4994E8,
+    LogicNative_isDebuggerAttached: 0x770D98,
+    
+    // GameObject manager
+    LogicGameObjectManager_addObject: 0xA81720,
+    
+    // Projectile trajectory
+    LogicProjectile_calculateTrajectory: 0xA0F5C4,
+    LogicProjectile_predictPosition: 0xA10ED8,
+    LogicProjectile_updateMovement: 0xA0F530,
+    LogicProjectile_calculateParabola: 0xA0F8AC,
+    
+    // Vtable
+    VTABLE_PROJECTILE_DATA: 0x010C2100,
+    
+    // Trajectory points (offsets within projectile object)
+    OFFSET_TRAJECTORY_POINTS_ARRAY: 0x58,
+    OFFSET_TRAJECTORY_POINTS_COUNT: 0x60,
+    OFFSET_CURVEBALL_ENABLED: 0x78,
+    OFFSET_CHARACTER_ROTATION: 0x50,
+    
+    // FPS
+    LogicGameMain_getFPS: 0x5A6654,
+};
