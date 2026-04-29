@@ -1,0 +1,395 @@
+setTimeout(function () {
+    const base = Process.getModuleByName('libg.so').base
+    const malloc = new NativeFunction(Process.getModuleByName('libc.so').getExportByName('malloc'), 'pointer', ['uint'])
+
+    // ── Natives ──────────────────────────────────────────────────────────────
+    const LogicGameObjectClient_getGlobalID        = new NativeFunction(base.add(0x12DB7D8), "uint32",   ["pointer"])
+    const LogicGameObjectClient_getX               = new NativeFunction(base.add(0x12DB82C), "uint32",   ["pointer"])
+    const LogicGameObjectClient_getY               = new NativeFunction(base.add(0x12DB834), "uint32",   ["pointer"])
+    const LogicGameObjectClient_getData            = new NativeFunction(base.add(0x12DB54C), "pointer",  ["pointer"])
+    const LogicProjectileData_getSpeed             = new NativeFunction(base.add(0x126E40C), "uint32",   ["pointer"])
+    const LogicProjectileData_getRadius            = new NativeFunction(base.add(0x126E48C), "uint32",   ["pointer"])
+    const LogicCharacterData_getCollisionRadius    = new NativeFunction(base.add(0x121BC34), "uint32",   ["pointer"])
+    const LogicBattleModeClient_getOwnCharacter    = new NativeFunction(base.add(0x13AB5D4), "pointer",  ["pointer"])
+    const LogicBattleModeClient_getOwnPlayerTeam   = new NativeFunction(base.add(0x13AB210), "uint32",   ["pointer"])
+    const BattleMode_getInstance                   = new NativeFunction(base.add(0x1114F60), "pointer",  [])
+    const GameScreen_getBattleClient               = new NativeFunction(base.add(0xFB228C),  "pointer",  ["pointer"])
+    const SetClientPrediction                      = new NativeFunction(base.add(0x13AB72C), "pointer",  ["pointer", "int", "int", "int"])
+    const ClientInput_constructor_int              = new NativeFunction(base.add(0x135BFC4), "pointer",  ["pointer", "int"])
+    const ClientInputManager_addInput              = new NativeFunction(base.add(0x9E6648),  "void",     ["pointer", "pointer"])
+
+    const LogicBattleModeClient_update                = base.add(0x13A9524)
+    const LogicProjectileClient_LogicProjectileClient = base.add(0x12E9B98)
+    const UpdateMovement                              = base.add(0xFC8414)
+
+    // ── Config ───────────────────────────────────────────────────────────────
+    const CONFIG = {
+        DODGE_DISTANCE:       380,   // single/double threat
+        DODGE_DISTANCE_MULTI: 460,   // 3+ threats
+        DODGE_DURATION:       90,    // ms
+        DODGE_DURATION_MULTI: 130,   // ms
+        PREDICTION_TIME:      7,     // ttc threshold (game units)
+        COLLISION_MARGIN:     160,
+        STALE_MS:             600,   // remove projectile after this many ms unseen
+        ANGLE_SAMPLE_DELAY:   1     // ms between position samples for angle calc
+    }
+
+    // Joystick memory offsets (v65)
+    const Joystick = { fgX: 2328, fgY: 2332, bgX: 2336, bgY: 2340, active: 3600 }
+
+    // ── State ────────────────────────────────────────────────────────────────
+    const c = {
+        Character: {
+            me:     ptr(0),
+            teamid: -1,
+            x:      0,
+            y:      0,
+            radius: 0
+        },
+        Dodge: {
+            isDodging:          false,
+            forceMovementBlock: false,
+            manualMoving:       false,
+            dodgeTimeout:       null,
+            movementInterval:   null,
+            movementTarget:     { x: 0, y: 0 },
+            pendingPrediction:  null,
+            lastBattleClient:   null,
+            lastThreats:        []
+        },
+        Projectile: {
+            // id -> { x, y, speed, radius, angle, own, lastUpdate }
+            mapdata: new Map()
+        }
+    }
+
+    // ── Movement helpers ─────────────────────────────────────────────────────
+    function sendInput(x, y) {
+        try {
+            const bm = BattleMode_getInstance()
+            if (!bm || bm.isNull()) return
+            const inputMgr = bm.add(88).readPointer()
+            if (!inputMgr || inputMgr.isNull()) return
+            const inputPtr = malloc(60)
+            if (!inputPtr || inputPtr.isNull()) return
+            ClientInput_constructor_int(inputPtr, 2)
+            inputPtr.add(8).writeInt(x)
+            inputPtr.add(12).writeInt(y)
+            ClientInputManager_addInput(inputMgr, inputPtr)
+        } catch (e) {}
+    }
+
+    function stopMovement() {
+        if (c.Dodge.movementInterval) {
+            clearInterval(c.Dodge.movementInterval)
+            c.Dodge.movementInterval = null
+            c.Dodge.movementTarget = { x: 0, y: 0 }
+        }
+    }
+
+    // ── Dodge engine ─────────────────────────────────────────────────────────
+    function scoreDodgeCandidate(gameAngle, threats, myX, myY, myRadius, dodgeDist) {
+        const margin = CONFIG.COLLISION_MARGIN + myRadius
+        const fx = myX + Math.sin(gameAngle) * dodgeDist
+        const fy = myY + Math.cos(gameAngle) * dodgeDist
+        let minClear = Infinity
+        for (const t of threats) {
+            const vx = Math.cos(t.angle) * t.speed
+            const vy = Math.sin(t.angle) * t.speed
+            const bx = fx - t.x, by = fy - t.y
+            const tCA = Math.max(0, (bx * vx + by * vy) / (t.speed * t.speed))
+            const cx = t.x + vx * tCA, cy = t.y + vy * tCA
+            const clear = Math.sqrt((fx - cx) ** 2 + (fy - cy) ** 2) - (t.radius + margin)
+            if (clear < minClear) minClear = clear
+        }
+        return minClear
+    }
+
+    function calculateBestDodge(threats, myX, myY, myRadius) {
+        if (threats.length === 0) return null
+        threats.sort((a, b) => a.ttc - b.ttc)
+        const limited   = threats.slice(0, 4)
+        const isMulti   = limited.length >= 3
+        const dodgeDist = isMulti ? CONFIG.DODGE_DISTANCE_MULTI : CONFIG.DODGE_DISTANCE
+        let bestAngle = null, bestScore = -Infinity
+        for (let i = 0; i < 360; i++) {
+            const angle = i * Math.PI / 180
+            const score = scoreDodgeCandidate(angle, limited, myX, myY, myRadius, dodgeDist)
+            if (score > bestScore) { bestScore = score; bestAngle = angle }
+        }
+        if (bestAngle === null) bestAngle = Math.PI / 2 - threats[0].angle - Math.PI / 2
+        return {
+            x: myX + Math.sin(bestAngle) * dodgeDist,
+            y: myY + Math.cos(bestAngle) * dodgeDist,
+            isMulti
+        }
+    }
+
+    function executeForceDodge(tx, ty, ids, isMulti) {
+        if (c.Dodge.dodgeTimeout) { clearTimeout(c.Dodge.dodgeTimeout); c.Dodge.dodgeTimeout = null }
+        c.Dodge.isDodging          = true
+        c.Dodge.forceMovementBlock = true
+        stopMovement()
+        sendInput(tx | 0, ty | 0)
+        c.Dodge.pendingPrediction = { x: tx | 0, y: ty | 0 }
+        const duration = isMulti ? CONFIG.DODGE_DURATION_MULTI : CONFIG.DODGE_DURATION
+        c.Dodge.dodgeTimeout = setTimeout(() => {
+            c.Dodge.isDodging          = false
+            c.Dodge.forceMovementBlock = false
+            c.Dodge.pendingPrediction  = null
+        }, duration)
+    }
+
+    function handleThreats(threats, myX, myY, myRadius) {
+        if (threats.length === 0) return
+        const urgent = threats.slice(0, 4)
+        const target = calculateBestDodge(urgent, myX, myY, myRadius)
+        if (target) executeForceDodge(target.x, target.y, urgent.map(t => t.id), target.isMulti)
+    }
+
+    // ── Threat evaluation ────────────────────────────────────────────────────
+    // Runs every update tick. Iterates only known enemy projectiles that have
+    // a resolved angle — no object-array scan, no vtable check needed.
+    function evaluateThreats() {
+        const myX    = c.Character.x
+        const myY    = c.Character.y
+        const myR    = c.Character.radius
+        if (!myX && !myY) return
+
+        const now    = Date.now()
+        const margin = CONFIG.COLLISION_MARGIN + myR
+        const threats = []
+
+        for (const [id, p] of c.Projectile.mapdata) {
+            // Prune stale entries
+            if (now - p.lastUpdate > CONFIG.STALE_MS) {
+                c.Projectile.mapdata.delete(id)
+                continue
+            }
+            // Skip own bullets or entries still waiting for angle
+            if (p.own || p.angle === null || p.angle === undefined) continue
+
+            const relX = p.x - myX
+            const relY = p.y - myY
+            const pvx  = Math.cos(p.angle) * p.speed
+            const pvy  = Math.sin(p.angle) * p.speed
+
+            // Skip if projectile is moving away from us
+            if (relX * pvx + relY * pvy > 0) continue
+
+            const dist         = Math.sqrt(relX * relX + relY * relY)
+            const closingSpeed = -(relX * pvx + relY * pvy) / dist
+            if (closingSpeed <= 0) continue
+
+            const hitRadius = p.radius + margin
+            // Skip if bullet's trajectory misses us entirely (perpendicular distance)
+            if (Math.abs(relX * pvy - relY * pvx) / p.speed > hitRadius) continue
+
+            const ttcRaw = (dist - hitRadius) / closingSpeed
+            const ttc    = ttcRaw < 0 ? 0 : ttcRaw
+            if (ttc < CONFIG.PREDICTION_TIME) {
+                threats.push({ id, x: p.x, y: p.y, speed: p.speed, radius: p.radius, angle: p.angle, ttc })
+            }
+        }
+
+        c.Dodge.lastThreats = threats
+        if (threats.length > 0) handleThreats(threats, myX, myY, myR)
+    }
+
+    // ── Joystick threat direction check ──────────────────────────────────────
+    function isMovingTowardThreat(selfPtr) {
+        try {
+            if (selfPtr.add(Joystick.active).readU8() === 0) return false
+            if (c.Dodge.lastThreats.length === 0) return false
+            const fgx  = selfPtr.add(Joystick.fgX).readFloat()
+            const fgy  = selfPtr.add(Joystick.fgY).readFloat()
+            const bgx  = selfPtr.add(Joystick.bgX).readFloat()
+            const bgy  = selfPtr.add(Joystick.bgY).readFloat()
+            const jdx  = bgx - fgx, jdy = bgy - fgy
+            const jlen = Math.sqrt(jdx * jdx + jdy * jdy)
+            if (jlen < 1e-4) return false
+            const jnx = jdx / jlen, jny = jdy / jlen
+            const px = c.Character.x, py = c.Character.y
+            for (const t of c.Dodge.lastThreats) {
+                const tbx   = t.x - px, tby = t.y - py
+                const tblen = Math.sqrt(tbx * tbx + tby * tby)
+                if (tblen < 1) continue
+                const dot = (jnx * tbx + jny * tby) / tblen
+                if (dot < 0.4) continue
+                const bvx = Math.cos(t.angle), bvy = Math.sin(t.angle)
+                if (-(bvx * tbx + bvy * tby) / tblen > 0.2) return true
+            }
+        } catch (e) {}
+        return false
+    }
+
+
+    Interceptor.attach(LogicProjectileClient_LogicProjectileClient, {
+        onEnter(args) {
+            this.proj  = args[0]
+            this.owner = args[1]
+            this.data  = args[2]
+        },
+        onLeave(retval) {
+            const proj  = this.proj
+            const owner = this.owner
+            const data  = this.data
+            if (!proj || !data) return
+
+            // Own-projectile check: owner pointer matches our character
+            const isOwn = (
+                owner && !owner.isNull() &&
+                c.Character.me && !c.Character.me.isNull() &&
+                owner.equals(c.Character.me)
+            )
+
+            // Sample 1 — read metadata 1ms after construction
+            setTimeout(() => {
+                try {
+                    const speed  = LogicProjectileData_getSpeed(data)
+                    const radius = LogicProjectileData_getRadius(data)
+                    if (radius === 0) return  // thrower/invalid
+
+                    const x1  = LogicGameObjectClient_getX(proj)
+                    const y1  = LogicGameObjectClient_getY(proj)
+                    const id  = LogicGameObjectClient_getGlobalID(proj).toString()
+                    const now = Date.now()
+
+                    // Flag as own — skip in evaluateThreats
+                    if (isOwn) {
+                        c.Projectile.mapdata.set(id, { x: x1, y: y1, speed, radius, angle: null, own: true, lastUpdate: now })
+                        return
+                    }
+
+                    // Spawn-distance fallback: bullet appeared within 650 units → treat as own
+                    const sdx = x1 - c.Character.x, sdy = y1 - c.Character.y
+                    if (sdx * sdx + sdy * sdy < 650 * 650) {
+                        c.Projectile.mapdata.set(id, { x: x1, y: y1, speed, radius, angle: null, own: true, lastUpdate: now })
+                        return
+                    }
+
+                    // Enemy projectile — register with angle pending
+                    c.Projectile.mapdata.set(id, { x: x1, y: y1, speed, radius, angle: null, own: false, lastUpdate: now })
+
+                    // Sample 2 — compute angle from movement delta
+                    setTimeout(() => {
+                        try {
+                            const x2  = LogicGameObjectClient_getX(proj)
+                            const y2  = LogicGameObjectClient_getY(proj)
+                            const dx  = x2 - x1
+                            const dy  = y2 - y1
+
+                            let angle
+                            if (dx * dx + dy * dy > 0) {
+                                // Accurate: real movement delta
+                                angle = Math.atan2(dy, dx)
+                            } else {
+                                // Fallback: estimate direction toward player
+                                const ex = c.Character.x - x1
+                                const ey = c.Character.y - y1
+                                const el = Math.sqrt(ex * ex + ey * ey)
+                                angle = el > 0 ? Math.atan2(ey, ex) : 0
+                            }
+
+                            const entry = c.Projectile.mapdata.get(id)
+                            if (entry && !entry.own) {
+                                entry.x          = x2
+                                entry.y          = y2
+                                entry.angle      = angle
+                                entry.lastUpdate = Date.now()
+                                c.Projectile.mapdata.set(id, entry)
+                            }
+
+                            console.log(`[projectile] id:${id} | pos:(${x2},${y2}) | myPos:(${c.Character.x},${c.Character.y}) | speed:${speed} | radius:${radius} | angle:${(angle * 180 / Math.PI).toFixed(1)}°`)
+                        } catch (e) {}
+                    }, CONFIG.ANGLE_SAMPLE_DELAY)
+
+                } catch (e) {}
+            }, 1)
+        }
+    })
+
+    // ── Battle update hook — character tracking + threat eval + prediction ───
+    Interceptor.attach(LogicBattleModeClient_update, {
+        onEnter(args) {
+            const bm = args[0]
+
+            // Cache battle client for SetClientPrediction
+            try {
+                const bc = GameScreen_getBattleClient(bm)
+                if (bc && !bc.isNull()) c.Dodge.lastBattleClient = bc
+            } catch (e) {}
+
+            try {
+                const me = LogicBattleModeClient_getOwnCharacter(bm)
+                if (!me || me.isNull()) {
+                    c.Character.me     = ptr(0)
+                    c.Character.teamid = -1
+                    c.Projectile.mapdata.clear()
+                    return
+                }
+
+                const x = LogicGameObjectClient_getX(me)
+                const y = LogicGameObjectClient_getY(me)
+                if (x < 0 || y < 0) return
+
+                c.Character.me     = me
+                c.Character.teamid = LogicBattleModeClient_getOwnPlayerTeam(bm)
+                c.Character.x      = x
+                c.Character.y      = y
+
+                // Update collision radius
+                try {
+                    const myData = LogicGameObjectClient_getData(me)
+                    if (myData && !myData.isNull())
+                        c.Character.radius = LogicCharacterData_getCollisionRadius(myData)
+                } catch (e) {}
+
+                // Evaluate all known enemy projectiles for threats
+                evaluateThreats()
+
+                // Apply pending SetClientPrediction (one-shot after dodge)
+                if (c.Dodge.pendingPrediction && c.Dodge.lastBattleClient) {
+                    try {
+                        const pp = c.Dodge.pendingPrediction
+                        c.Dodge.pendingPrediction = null
+                        SetClientPrediction(c.Dodge.lastBattleClient, pp.x, pp.y, 1)
+                    } catch (e) {}
+                }
+
+            } catch (e) {}
+        }
+    })
+
+    // ── UpdateMovement replacer ───────────────────────────────────────────────
+    // Blocks movement during active dodge and when joystick aims into a threat.
+    const UpdateMovement_orig = new NativeFunction(UpdateMovement, 'int64', ['pointer', 'pointer', 'pointer', 'pointer'])
+
+    Interceptor.replace(UpdateMovement, new NativeCallback(function (selfPtr, a2, a3, a4) {
+        const charPtr = a3
+        if (!charPtr || charPtr.isNull()) return UpdateMovement_orig(selfPtr, a2, a3, a4)
+        try {
+            if (c.Dodge.isDodging || c.Dodge.forceMovementBlock) return new Int64(1)
+            if (isMovingTowardThreat(selfPtr)) {
+                try {
+                    const myX = LogicGameObjectClient_getX(charPtr) | 0
+                    const myY = LogicGameObjectClient_getY(charPtr) | 0
+                    sendInput(myX, myY)
+                } catch (e) {}
+                return new Int64(1)
+            }
+            try {
+                if (selfPtr.add(Joystick.active).readU8() !== 0) {
+                    stopMovement()
+                    c.Dodge.manualMoving = true
+                } else {
+                    c.Dodge.manualMoving = false
+                }
+            } catch (e) {}
+        } catch (e) {}
+        return UpdateMovement_orig(selfPtr, a2, a3, a4)
+    }, 'int64', ['pointer', 'pointer', 'pointer', 'pointer']))
+
+    console.log('Dodge yy loaded')
+
+}, 3000)}, 3000)
