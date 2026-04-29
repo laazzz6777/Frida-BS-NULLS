@@ -1,0 +1,887 @@
+//old, bad offsets
+
+function load() {
+    (function () {
+        // offsets
+        var off_construct_strstring = 0xCF6488;
+        var off_stringtable_getmovieclip = 0xB1FCB0;
+        var off_stage_instance_ptr = 0x11427C0;
+        var off_stage_addchild = 0xB66464;
+        var off_displayobject_setpixelsnappedxy = 0xB48654;
+        var off_sprite_ctor = 0xB5D7FC;
+        var off_gotoandstop = 0xB4D0BC;
+        var off_movieclip_settext = 0xB7EEE0;
+        var off_dropguicontainer_ctor = 0x54FAC4;
+        var off_dropguicontainer_addgamebutton = 0x54FC6C;
+        var off_custombutton_pressed = 0xB7DFEC;
+        var off_movieclip_gettextfieldbyname = 0xB4E0BC;
+        var off_decoratedtextfield_setupdecoratedtext = 0x5447D8;
+        var off_logicdatatables_getcolorgradientbyname = 0x99C214;
+        var off_moviecliphelper_settextandscaleifnecessary = 0x8FB824;
+
+		
+		
+        var poll_ms = 150;
+        var debounce_ms = 200;
+        var off_screen_x = 9999;
+        var off_screen_y = 9999;
+        var button_states = {};
+        function safe_alloc_utf8(s) {
+            try {
+                return Memory.allocUtf8String(String(s));
+            } catch (e) {
+                return ptr('0x0');
+            }
+        }
+        function get_lib_base() {
+            return Module.findBaseAddress('libg.so');
+        }
+        function bootstrap_with_base(base) {
+            try {
+                var mod = Process.findModuleByName('libg.so');
+                if (mod && mod.size) {
+                    Memory.protect(mod.base, mod.size, 'rwx');
+                }
+            } catch (e) {}
+            var libc = Process.findModuleByName('libc.so') || Process.findModuleByName('libc.so.6');
+            var malloc_fn = null;
+            if (libc) {
+                try {
+                    malloc_fn = new NativeFunction(Module.getExportByName(libc.name, 'malloc'), 'pointer', ['uint']);
+                } catch (e) {}
+            }
+            var stringtable_getmovieclip = new NativeFunction(base.add(off_stringtable_getmovieclip), 'pointer', ['pointer', 'pointer']);
+            var string_ctor = new NativeFunction(base.add(off_construct_strstring), 'pointer', ['pointer', 'pointer']);
+            var stage_addchild = new NativeFunction(base.add(off_stage_addchild), 'pointer', ['pointer', 'pointer']);
+            var displayobject_setpixelsnappedxy = new NativeFunction(base.add(off_displayobject_setpixelsnappedxy), 'pointer', ['pointer', 'float', 'float']);
+            var sprite_ctor = new NativeFunction(base.add(off_sprite_ctor), 'void', ['pointer', 'int']);
+            var gotoandstop = new NativeFunction(base.add(off_gotoandstop), 'void', ['pointer', 'int']);
+            var movieclip_settext = new NativeFunction(base.add(off_movieclip_settext), 'void', ['pointer', 'pointer', 'pointer']);
+            var drop_ctor_addr = base.add(off_dropguicontainer_ctor);
+            var movieclip_gettextfieldbyname = new NativeFunction(base.add(off_movieclip_gettextfieldbyname), 'pointer', ['pointer', 'pointer']);
+            var decoratedtextfield_setupdecoratedtext = new NativeFunction(base.add(off_decoratedtextfield_setupdecoratedtext), 'void', ['pointer', 'pointer', 'pointer']);
+            var logicdatatables_getcolorgradientbyname = new NativeFunction(base.add(off_logicdatatables_getcolorgradientbyname), 'pointer', ['pointer', 'int']);
+            var moviecliphelper_settextandscaleifnecessary = new NativeFunction(base.add(off_moviecliphelper_settextandscaleifnecessary), 'void', ['pointer', 'pointer', 'int', 'int']);
+            var dropguicontainer_addgamebutton = null;
+            try {
+                dropguicontainer_addgamebutton = new NativeFunction(base.add(off_dropguicontainer_addgamebutton), 'pointer', ['pointer', 'pointer', 'int']);
+            } catch (e) {}
+            var gamebutton_ctor = new NativeFunction(base.add(0x54E628), 'void', ['pointer']);
+            var settext_native = new NativeFunction(base.add(0x54EC80), 'pointer', ['pointer', 'pointer', 'int']);
+            var stage_instance = null;
+            try {
+                stage_instance = Memory.readPointer(base.add(off_stage_instance_ptr));
+            } catch (e) {}
+            function str_ptr(s) {
+                return safe_alloc_utf8(String(s));
+            }
+            function sc_ptr(s) {
+                if (!malloc_fn) {
+                    return safe_alloc_utf8(String(s));
+                }
+                try {
+                    var p = malloc_fn(0x40);
+                    string_ctor(p, safe_alloc_utf8(String(s)));
+                    return p;
+                } catch (e) {
+                    return safe_alloc_utf8(String(s));
+                }
+            }
+            function safe_set_position(obj_ptr, x, y) {
+                try {
+                    if (!obj_ptr || ptr(obj_ptr).isNull()) {
+                        return;
+                    }
+                    displayobject_setpixelsnappedxy(obj_ptr, x, y);
+                } catch (e) {}
+            }
+            function safe_set_size(obj_ptr, h, w) {
+                try {
+                    if (!obj_ptr || ptr(obj_ptr).isNull()) {
+                        return;
+                    }
+                    obj_ptr.add(16).writeFloat(h);
+                    obj_ptr.add(28).writeFloat(w);
+                } catch (e) {}
+            }
+            function create_manual_button(clip_name, text, x, y, h, w, frame) {
+                try {
+                    var btn = malloc_fn ? malloc_fn(544) : Memory.alloc(544);
+                    if (!btn || ptr(btn).isNull()) {
+                        return null;
+                    }
+                    gamebutton_ctor(btn);
+                    var clip = stringtable_getmovieclip(str_ptr("sc/ui.sc"), str_ptr(clip_name));
+                    if (!clip || ptr(clip).isNull()) {
+                        return null;
+                    }
+                    try {
+                        gotoandstop(clip, frame | 0);
+                    } catch (e) {}
+                    try {
+                        var vptr = btn.readPointer();
+                        if (!vptr || ptr(vptr).isNull()) {
+                            return null;
+                        }
+                        var init_ptr = vptr.add(352).readPointer();
+                        if (!init_ptr || ptr(init_ptr).isNull()) {
+                            return null;
+                        }
+                        var init_fn = new NativeFunction(init_ptr, 'void', ['pointer', 'pointer', 'int']);
+                        init_fn(btn, clip, 1);
+                    } catch (e) {
+                        return null;
+                    }
+                    try {
+                        settext_native(btn, sc_ptr(text), 1);
+                    } catch (e) {}
+                    var apply_gradient = ["Aimbot", "Auto-Dodge"].includes(text);
+                    if (apply_gradient) {
+                        try {
+                            var text_field = movieclip_gettextfieldbyname(clip, str_ptr("Text"));
+                            if (text_field && !ptr(text_field).isNull()) {
+                                var gradient = logicdatatables_getcolorgradientbyname(sc_ptr("Golden"), 1);
+                                if (gradient && !ptr(gradient).isNull()) {
+                                    moviecliphelper_settextandscaleifnecessary(text_field, sc_ptr(text), 1, 0);
+                                    decoratedtextfield_setupdecoratedtext(text_field, sc_ptr(text), gradient);
+                                }
+                            }
+                        } catch (e) {}
+                    }
+                    safe_set_size(btn, h || 1, w || 1);
+                    safe_set_position(btn, x, y);
+                    if (stage_instance && !ptr(stage_instance).isNull()) {
+                        try {
+                            stage_addchild(stage_instance, btn);
+                        } catch (e) {}
+                    }
+                    return { btn: btn, clip: clip, text: text };
+                } catch (e) {
+                    return null;
+                }
+            }
+            var exit_button = null;
+            function create_exit_button() {
+                try {
+                    var btn = malloc_fn ? malloc_fn(544) : Memory.alloc(544);
+                    if (!btn || ptr(btn).isNull()) {
+                        return null;
+                    }
+                    gamebutton_ctor(btn);
+                    var clip = stringtable_getmovieclip(str_ptr("sc/ui.sc"), str_ptr("map_editor_exit_button"));
+                    if (!clip || ptr(clip).isNull()) {
+                        return null;
+                    }
+                    try {
+                        gotoandstop(clip, 1);
+                    } catch (e) {}
+                    try {
+                        var vptr = btn.readPointer();
+                        if (!vptr || ptr(vptr).isNull()) {
+                            return null;
+                        }
+                        var init_ptr = vptr.add(352).readPointer();
+                        if (!init_ptr || ptr(init_ptr).isNull()) {
+                            return null;
+                        }
+                        var init_fn = new NativeFunction(init_ptr, 'void', ['pointer', 'pointer', 'int']);
+                        init_fn(btn, clip, 1);
+                    } catch (e) {
+                        return null;
+                    }
+                    try {
+                        settext_native(btn, sc_ptr("MENU"), 1);
+                    } catch (e) {}
+                    safe_set_position(btn, 50, 520);
+                    safe_set_size(btn, 1, 1);
+                    if (stage_instance && !ptr(stage_instance).isNull()) {
+                        try {
+                            stage_addchild(stage_instance, btn);
+                        } catch (e) {}
+                    }
+                    return btn;
+                } catch (e) {
+                    return null;
+                }
+            }
+            var current_popup = null;
+            var manual_button_pairs = [];
+            function create_strip_popup() {
+                try {
+                    var obj = malloc_fn ? malloc_fn(0x400) : Memory.alloc(0x400);
+                    if (!obj || ptr(obj).isNull()) {
+                        return null;
+                    }
+                    try {
+                        sprite_ctor(obj, 1);
+                    } catch (e) {}
+                    var movie_clip = stringtable_getmovieclip(str_ptr("sc/ui.sc"), str_ptr("strip_popup"));
+                    if (!movie_clip || ptr(movie_clip).isNull()) {
+                        return null;
+                    }
+                    try {
+                        gotoandstop(movie_clip, 1);
+                    } catch (e) {}
+                    try {
+                        var drop_ctor = new NativeFunction(drop_ctor_addr, 'void', ['pointer', 'pointer']);
+                        drop_ctor(obj, movie_clip);
+                    } catch (e) {}
+                    safe_set_size(obj, 1, 1);
+                    safe_set_position(obj, 500.7, 287);
+                    try {
+                        obj.add(78).writeU8(1);
+                    } catch (e) {}
+                    if (stage_instance && !ptr(stage_instance).isNull()) {
+                        try {
+                            stage_addchild(stage_instance, obj);
+                        } catch (e) {}
+                    }
+                    try {
+                        movieclip_settext(obj, str_ptr("title_txt"), sc_ptr("Tale+ Crack"));
+                    } catch (e) {}
+                    try {
+                        if (dropguicontainer_addgamebutton) {
+                            var btn_name_ptr = str_ptr("close_button");
+                            var close_btn_ptr = dropguicontainer_addgamebutton(obj, btn_name_ptr, 1);
+                            if (close_btn_ptr && !ptr(close_btn_ptr).isNull()) {
+                                try {
+                                    obj.add(236).writePointer(close_btn_ptr);
+                                } catch (e) {}
+                            }
+                        }
+                    } catch (e) {}
+                    const button_configs = [
+                        { text: "Aimbot", x: 572, y: 270, h: 0.85, w: 0.85 },
+                        { text: "Auto-Dodge", x: 427, y: 270, h: 0.85, w: 0.85 },
+                        { text: "@talecrack", x: 493, y: 420, h: 1.1, w: 1.1 }
+                    ];
+                    for (var i = 0; i < button_configs.length; i++) {
+                        var cfg = button_configs[i];
+                        try {
+                            var normal = create_manual_button("country_item", cfg.text, cfg.x, cfg.y, cfg.h, cfg.w, 1);
+                            if (normal) {
+                                if (cfg.text === "@talecrack") {
+                                    // Non-toggable, only normal state
+                                    manual_button_pairs.push({ normal: normal, green: null, text: cfg.text, pos_x: cfg.x, pos_y: cfg.y, state: 'normal' });
+                                } else {
+                                    var green = create_manual_button("country_item", cfg.text, off_screen_x, off_screen_y, cfg.h, cfg.w, 2);
+                                    if (green) {
+                                        var state = button_states[cfg.text] || 'normal';
+                                        if (state === 'green') {
+                                            safe_set_position(normal.btn, off_screen_x, off_screen_y);
+                                            safe_set_position(green.btn, cfg.x, cfg.y);
+                                        } else {
+                                            safe_set_position(normal.btn, cfg.x, cfg.y);
+                                            safe_set_position(green.btn, off_screen_x, off_screen_y);
+                                        }
+                                        manual_button_pairs.push({ normal: normal, green: green, text: cfg.text, pos_x: cfg.x, pos_y: cfg.y, state: state });
+                                    }
+                                }
+                            }
+                        } catch (e) {}
+                    }
+                    current_popup = obj;
+                    return obj;
+                } catch (e) {
+                    return null;
+                }
+            }
+            var last_press_time = 0;
+            var last_pressed_button = null;
+            try {
+                var custombutton_fn = new NativeFunction(base.add(off_custombutton_pressed), 'void', ['pointer']);
+                Interceptor.attach(custombutton_fn, {
+                    onEnter: function (args) {
+                        try {
+                            var pressed_ptr = args[0];
+                            if (!pressed_ptr || ptr(pressed_ptr).isNull()) {
+                                return;
+                            }
+                            var current_time = Date.now();
+                            if (current_time - last_press_time < debounce_ms && last_pressed_button === pressed_ptr.toString()) {
+                                return;
+                            }
+                            last_press_time = current_time;
+                            last_pressed_button = pressed_ptr.toString();
+                            if (exit_button && !ptr(exit_button).isNull() && pressed_ptr.toString() === exit_button.toString()) {
+                                rpc.exports.spawnpopup();
+                                return;
+                            }
+                            if (current_popup && !ptr(current_popup).isNull()) {
+                                var close_btn_ptr = null;
+                                try {
+                                    close_btn_ptr = current_popup.add(236).readPointer();
+                                } catch (e) {}
+                                if (close_btn_ptr && !ptr(close_btn_ptr).isNull() && pressed_ptr.toString() === close_btn_ptr.toString()) {
+                                    rpc.exports.closepopup();
+                                    return;
+                                }
+                            }
+                            var p_str = pressed_ptr.toString();
+                            for (var i = 0; i < manual_button_pairs.length; i++) {
+                                var pair = manual_button_pairs[i];
+                                if (pair.green === null) {
+                                    // Skip non-toggable buttons 
+                                    continue;
+                                }
+                                if (pair.normal && pair.normal.btn && !ptr(pair.normal.btn).isNull() && pair.normal.btn.toString() === p_str) {
+                                    safe_set_position(pair.normal.btn, off_screen_x, off_screen_y);
+                                    safe_set_position(pair.green.btn, pair.pos_x, pair.pos_y);
+                                    pair.state = 'green';
+                                    button_states[pair.text] = 'green';
+                                    if (pair.text === "Aimbot") {
+                                        aimbotActive = true;
+                                        showFloater("Aimbot: Enabled");
+                                    } else if (pair.text === "Auto-Dodge") {
+                                        dodgeState.active = true;
+                                        showFloater("Dodge: Enabled");
+                                    }
+                                    return;
+                                } else if (pair.green && pair.green.btn && !ptr(pair.green.btn).isNull() && pair.green.btn.toString() === p_str) {
+                                    safe_set_position(pair.green.btn, off_screen_x, off_screen_y);
+                                    safe_set_position(pair.normal.btn, pair.pos_x, pair.pos_y);
+                                    pair.state = 'normal';
+                                    button_states[pair.text] = 'normal';
+                                    if (pair.text === "Aimbot") {
+                                        aimbotActive = false;
+                                        showFloater("Aimbot: Disabled");
+                                    } else if (pair.text === "Auto-Dodge") {
+                                        dodgeState.active = false;
+                                        showFloater("Dodge: Disabled");
+                                    }
+                                    return;
+                                }
+                            }
+                        } catch (e) {}
+                    }
+                });
+            } catch (e) {}
+            rpc.exports = {
+                spawnpopup: function () {
+                    if (current_popup && !ptr(current_popup).isNull()) {
+                        return ptr(current_popup).toString();
+                    }
+                    var p = create_strip_popup();
+                    return p ? ptr(p).toString() : null;
+                },
+                closepopup: function () {
+                    try {
+                        if (current_popup && !ptr(current_popup).isNull()) {
+                            try {
+                                current_popup.add(78).writeU8(0);
+                            } catch (e) {}
+                            try {
+                                safe_set_position(current_popup, off_screen_x, off_screen_y);
+                            } catch (e) {}
+                            manual_button_pairs.forEach(pair => {
+                                try {
+                                    if (pair.normal && pair.normal.btn && !ptr(pair.normal.btn).isNull()) {
+                                        pair.normal.btn.add(78).writeU8(0);
+                                    }
+                                    if (pair.green && pair.green.btn && !ptr(pair.green.btn).isNull()) {
+                                        pair.green.btn.add(78).writeU8(0);
+                                    }
+                                } catch (e) {}
+                            });
+                            current_popup = null;
+                            manual_button_pairs = [];
+                            return true;
+                        }
+                        return false;
+                    } catch (e) {
+                        return false;
+                    }
+                }
+            };
+            exit_button = create_exit_button();
+        }
+        var base = get_lib_base();
+        if (base) {
+            bootstrap_with_base(base);
+        } else {
+            var poll = setInterval(function () {
+                base = get_lib_base();
+                if (base) {
+                    clearInterval(poll);
+                    bootstrap_with_base(base);
+                }
+            }, poll_ms);
+        }
+    })();
+
+    "use strict";
+    //  BSXdodge.js
+    const base = Module.findBaseAddress("libg.so");
+    
+    const OFFSETS = {
+        LogicBattleModeClient_update: 0xABC8EC,
+        BattleMode_getInstance: 0x8CC28C,
+        ClientInputManager_addInput: 0x7200FC,
+        ClientInput_constructor_int: 0xA7DC40,
+        LogicGameObjectClient_getData: 0xA1AC54,
+        LogicProjectileData_getSpeed: 0x9BF1BC,
+        LogicProjectileData_getRadius: 0x9BF234,
+        LogicCharacterData_getCollisionRadius: 0x978798,
+        LogicGameObjectClient_getX: 0xA1AF00,
+        LogicGameObjectClient_getY: 0xA1AF08,
+        LogicGameObjectClient_getGlobalID: 0xA1AEAC,
+        LogicBattleModeClient_getOwnCharacter: 0xABE5C0,
+        LogicBattleModeClient_getOwnPlayerTeam: 0xABE1F8,
+        VTABLE_PROJECTILE_DATA: 0x105EA78,
+        BattleScreen_getClosestTargetForAutoshoot: 0x77FFD8,
+        BattleScreen_activateSkill: 0x77B50C,
+        Gui_getInstance: 0x5478E8,
+        StringCtor: 0xCF6488,
+        Gui_showFloaterTextAtDefaultPos: 0x548390
+    };
+
+    // natives
+    const natives = {
+        BattleMode_getInstance: new NativeFunction(base.add(OFFSETS.BattleMode_getInstance), "pointer", []),
+        ClientInput_constructor_int: new NativeFunction(base.add(OFFSETS.ClientInput_constructor_int), "pointer", ["pointer", "int"]),
+        ClientInputManager_addInput: new NativeFunction(base.add(OFFSETS.ClientInputManager_addInput), "void", ["pointer", "pointer"]),
+        LogicGameObjectClient_getData: new NativeFunction(base.add(OFFSETS.LogicGameObjectClient_getData), "pointer", ["pointer"]),
+        LogicProjectileData_getSpeed: new NativeFunction(base.add(OFFSETS.LogicProjectileData_getSpeed), "uint32", ["pointer"]),
+        LogicProjectileData_getRadius: new NativeFunction(base.add(OFFSETS.LogicProjectileData_getRadius), "uint32", ["pointer"]),
+        LogicCharacterData_getCollisionRadius: new NativeFunction(base.add(OFFSETS.LogicCharacterData_getCollisionRadius), "uint32", ["pointer"]),
+        LogicGameObjectClient_getX: new NativeFunction(base.add(OFFSETS.LogicGameObjectClient_getX), "uint32", ["pointer"]),
+        LogicGameObjectClient_getY: new NativeFunction(base.add(OFFSETS.LogicGameObjectClient_getY), "uint32", ["pointer"]),
+        LogicGameObjectClient_getGlobalID: new NativeFunction(base.add(OFFSETS.LogicGameObjectClient_getGlobalID), "uint32", ["pointer"]),
+        LogicBattleModeClient_getOwnCharacter: new NativeFunction(base.add(OFFSETS.LogicBattleModeClient_getOwnCharacter), "pointer", ["pointer"]),
+        LogicBattleModeClient_getOwnPlayerTeam: new NativeFunction(base.add(OFFSETS.LogicBattleModeClient_getOwnPlayerTeam), "uint32", ["pointer"]),
+        Gui_getInstance: new NativeFunction(base.add(OFFSETS.Gui_getInstance), "pointer", []),
+        StringCtor: new NativeFunction(base.add(OFFSETS.StringCtor), "pointer", ["pointer", "pointer"]),
+        Gui_showFloaterTextAtDefaultPos: new NativeFunction(base.add(OFFSETS.Gui_showFloaterTextAtDefaultPos), "void", ["pointer", "pointer", "float", "int"])
+    };
+  
+    const getinstance = natives.Gui_getInstance;
+    const stringctor = natives.StringCtor;
+    const floater = natives.Gui_showFloaterTextAtDefaultPos;
+    const malloc = new NativeFunction(Module.getExportByName('libc.so', 'malloc'), 'pointer', ['uint']);
+    function createRecentArray(max = 2) {
+        const arr = [];
+        return {
+            array: arr,
+            push: val => {
+                arr.push(val);
+                if (arr.length > max) arr.shift();
+            },
+            setMax: newMax => {
+                max = newMax;
+                while (arr.length > max) arr.shift();
+            }
+        };
+    }
+    function predictFuturePosition(timeToPredictSeconds) {
+        // Need at least 2 positions and 1 time difference to calculate velocity
+        if (latestX.array.length < 2 || timeDiffs.array.length < 1) {
+            return { x: latestX.array[latestX.array.length - 1] || 0,
+                     y: latestY.array[latestY.array.length - 1] || 0 };
+        }
+        // Calculate average time difference in seconds
+        const totalTimeDiff = timeDiffs.array.reduce((sum, diff) => sum + diff, 0);
+        const avgTimeDiff = totalTimeDiff / timeDiffs.array.length / 1000; // convert to seconds
+        // Calculate velocities (pixels per second)
+        let totalVx = 0;
+        let totalVy = 0;
+        let weightSum = 0;
+      
+        // Calculate weighted velocities (more recent movements have higher weight)
+        for (let i = 1; i < latestX.array.length; i++) {
+            const dx = latestX.array[i] - latestX.array[i - 1];
+            const dy = latestY.array[i] - latestY.array[i - 1];
+            const dt = timeDiffs.array[i - 1] / 1000; // in seconds
+          
+            // Skip if time difference is 0 to avoid division by zero
+            if (dt <= 0) continue;
+          
+            const weight = i; // linear weighting (most recent has highest weight)
+            totalVx += (dx / dt) * weight;
+            totalVy += (dy / dt) * weight;
+            weightSum += weight;
+        }
+        // Calculate weighted average velocity
+        const avgVx = weightSum > 0 ? totalVx / weightSum : 0;
+        const avgVy = weightSum > 0 ? totalVy / weightSum : 0;
+        // Get current position
+        const currentX = latestX.array[latestX.array.length - 1];
+        const currentY = latestY.array[latestY.array.length - 1];
+        // Calculate speed
+        const speed = Math.sqrt(avgVx * avgVx + avgVy * avgVy);
+        // If speed is very low, assume target is stationary
+        const SPEED_THRESHOLD = 1; // Puedes ajustar este valor según el juego
+        if (speed < SPEED_THRESHOLD) {
+            return { x: currentX, y: currentY };
+        }
+        // Predict future position
+        const predictedX = currentX + avgVx * timeToPredictSeconds;
+        const predictedY = currentY + avgVy * timeToPredictSeconds;
+        return { x: predictedX, y: predictedY };
+    }
+    function calculateDistance(x1, y1, x2, y2) {
+        const dx = x2 - x1;
+        const dy = y2 - y1;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+    function calculateTimeToHit(x1, y1, x2, y2) {
+        const distance = calculateDistance(x1, y1, x2, y2);
+        return distance / config.projectileSpeed; // time = distance / speed
+    }
+    function getStrPtr(str) {
+        return Memory.allocUtf8String(str);
+    }
+    function getScPtr(str) {
+        var pointer = malloc(40);
+        stringctor(pointer, getStrPtr(str)); return pointer;
+    }
+    function showFloater(text) {
+        const inst = getinstance();
+        const scptr = getScPtr(text);
+        if (!inst || inst.isNull && inst.isNull()) {
+            console.log('[Aimbot] Gui_getInstance devolvió puntero nulo');
+            return;
+        }
+        if (!scptr || (scptr.isNull && scptr.isNull())) {
+            console.log('[Aimbot] getScPtr devolvió puntero nulo');
+            return;
+        }
+        try {
+            floater(inst, scptr, 0, -1);
+        } catch (e) {
+            console.log('[Aimbot] Error en showFloater:', e);
+        }
+    }
+    const config = {
+        lastpositionsLen: 3, // how many positions to keep for velocity calculation
+        projectileSpeed: 3255, // units per second, byron 2000, bea 3255, piper 4000, collette 4000
+        useWeightedAverage : false, // use weighted average for velocity calculation
+        timeToHitMultiplyCoeficient: 0.8, // how much to multiply the time to hit by
+    }
+    //attach getClosestTargetForAutoShoot and only log if return value changed
+    //gets use the closest hittable enemy, takes walls and range into account
+    //also use it as a game loop, called every frame
+    const latestX = createRecentArray(config.lastpositionsLen);
+    const latestY = createRecentArray(config.lastpositionsLen);
+    const timeDiffs = createRecentArray(config.lastpositionsLen - 1); //stores ms between updates
+    let battleMode = null; //will be set when entering battle mode
+    let lastTime = 0;
+    Interceptor.attach(base.add(OFFSETS.BattleScreen_getClosestTargetForAutoshoot), {
+        onLeave: function(retval) {
+            if (retval == 0x0) { //if retval is 0x0, it means no target found
+                return;
+            }
+            const x = natives.LogicGameObjectClient_getX(retval);
+            const y = natives.LogicGameObjectClient_getY(retval);
+            latestX.push(x);
+            latestY.push(y);
+            const now = Date.now();
+          
+            if (lastTime !== 0) {
+                const diff = now - lastTime;
+                timeDiffs.push(diff); //store the time difference between updates
+            }
+            lastTime = now;
+        }
+    });
+    let aimbotActive = false; // Initial state off, controlled by menu
+    Interceptor.attach(base.add(OFFSETS.BattleScreen_activateSkill), {
+        onEnter: function(args) {
+            let isAutoshot = (parseInt(args[6]) !== 0); //args[6] is the target globalID, only set if shot was autoshot
+          
+            if (isAutoshot && battleMode && aimbotActive) {
+                const ownLogicCharacter = natives.LogicBattleModeClient_getOwnCharacter(battleMode);
+                const ownX = natives.LogicGameObjectClient_getX(ownLogicCharacter);
+                const ownY = natives.LogicGameObjectClient_getY(ownLogicCharacter);
+                const timeToHit = config.timeToHitMultiplyCoeficient*calculateTimeToHit(
+                    ownX,
+                    ownY,
+                    latestX.array[latestX.array.length - 1],
+                    latestY.array[latestY.array.length - 1]
+                );
+                const predictedPos = predictFuturePosition(timeToHit, config.useWeightedAverage);
+                args[5] = ptr(0); //idk what it does, but otherwise target x and y dont take effect
+                args[1] = ptr(predictedPos.x); // modify x
+                args[2] = ptr(predictedPos.y); // modify y
+            }
+        },
+    });
+    Interceptor.attach(base.add(OFFSETS.LogicBattleModeClient_update), {
+        onEnter: function(args) {
+           battleMode = args[0];
+        }
+    });
+	
+    console.log("[Aimbot] Aimbot loaded and ready to go!");
+    console.log("[Aimbot] Config: ");
+    console.log("[Aimbot] lastpositionsLen: " + config.lastpositionsLen);
+    console.log("[Aimbot] projectileSpeed: " + config.projectileSpeed);
+    console.log("[Aimbot] useWeightedAverage: " + config.useWeightedAverage);
+    console.log("[Aimbot] timeToHitMultiplyCoeficient: " + config.timeToHitMultiplyCoeficient);
+    // --- INICIO LÓGICA DODGE (de BSXdodge.js) ---
+    // Variables y configuración para dodge
+    const PTR_VTABLE_PROJECTILE_DATA = base.add(OFFSETS.VTABLE_PROJECTILE_DATA);
+    const malloc2 = malloc;
+    const free = new NativeFunction(Module.getExportByName('libc.so', 'free'), 'void', ['pointer']);
+    const _exitFunc = new NativeFunction(Module.getExportByName('libc.so', 'exit'), 'void', ['int']);
+    let dodgeState = {
+        ownCharacter: ptr(0),
+        ownTeamId: -1,
+        isDodging: false,
+        movementTarget: { x: 0, y: 0 },
+        projectiles: new Map(),
+        lastDodgeTime: 0,
+        lastInput: { x: 0, y: 0, time: 0 },
+        dodgeTimeout: null,
+        active: false, // Initial state off, controlled by menu
+        currentDodge: { x: 0, y: 0 },
+        queuedInput: null,
+        forceDodge: false,
+        forceMovementBlock: false,
+        lastThreatDirection: 0,
+        consecutiveDodges: 0,
+        movementInterval: null,
+        threatHistory: new Map(),
+        _lastIntegrityCheck: 0,
+        _integrityInterval: 5 * 60 * 1000 + (Math.random() * 3 * 60 * 1000),
+        _cacheString: 'a'.repeat(50000)
+    };
+    const DODGE_CONFIG = {
+        DODGE_DISTANCE: 400,
+        DODGE_DURATION: 150,
+        PREDICTION_TIME: 0.65,
+        MIN_PROJECTILE_SPEED: 40,
+        STALE_PROJECTILE_THRESHOLD: 1000,
+        ANGLE_DETECTION_THRESHOLD: 12,
+        DODGE_COOLDOWN: 12,
+        INPUT_COOLDOWN: 12,
+        COLLISION_MARGIN: 80,
+        MOVEMENT_UPDATE_INTERVAL: 12,
+        DODGE_UPDATE_MS: 12,
+        FORCE_BLOCK_DURATION: 300,
+        HIGH_SPEED_THRESHOLD: 300
+    };
+    function normalizeAngle(angle) {
+        while (angle > Math.PI) angle -= 2 * Math.PI;
+        while (angle < -Math.PI) angle += 2 * Math.PI;
+        return angle;
+    }
+    function startMoving(x, y) {
+        if (dodgeState.forceMovementBlock) {
+            dodgeState.queuedInput = { x, y };
+            return;
+        }
+        stopMovement();
+        dodgeState.movementTarget = { x, y };
+        dodgeState.movementInterval = setInterval(() => {
+            if (!dodgeState.isDodging && !dodgeState.forceMovementBlock) {
+                sendInput(x, y);
+            }
+        }, DODGE_CONFIG.MOVEMENT_UPDATE_INTERVAL);
+    }
+    function stopMovement() {
+        if (dodgeState.movementInterval) {
+            clearInterval(dodgeState.movementInterval);
+            dodgeState.movementInterval = null;
+        }
+    }
+    function sendInput(x, y, isDodge = false) {
+        const now = Date.now();
+        if (!isDodge && now - dodgeState.lastInput.time < DODGE_CONFIG.INPUT_COOLDOWN) return;
+        try {
+            const battleMode = natives.BattleMode_getInstance();
+            if (!battleMode || battleMode.isNull()) return;
+            const inputMgr = battleMode.add(88).readPointer();
+            if (!inputMgr || inputMgr.isNull()) return;
+            const inputPtr = malloc2(60);
+            if (!inputPtr || inputPtr.isNull()) return;
+            natives.ClientInput_constructor_int(inputPtr, 2);
+            inputPtr.add(8).writeInt(x);
+            inputPtr.add(12).writeInt(y);
+            natives.ClientInputManager_addInput(inputMgr, inputPtr);
+            dodgeState.lastInput = { x, y, time: now };
+            if (isDodge) {
+                dodgeState.currentDodge = { x, y };
+            }
+        } catch (e) {}
+    }
+    function analyzeProjectiles(objects, count, myTeamId, myX, myY, myRadius) {
+        const now = Date.now();
+        const currentIds = new Set();
+        const threats = [];
+        for (let i = 0; i < count; i++) {
+            try {
+                const objPtr = objects.add(i * 8).readPointer();
+                if (!objPtr || objPtr.isNull()) continue;
+                const dataPtr = natives.LogicGameObjectClient_getData(objPtr);
+                if (!dataPtr || dataPtr.isNull()) continue;
+                const vtable = dataPtr.readPointer();
+                if (!vtable.equals(PTR_VTABLE_PROJECTILE_DATA)) continue;
+                const id = natives.LogicGameObjectClient_getGlobalID(objPtr).toString();
+                currentIds.add(id);
+                const teamId = objPtr.add(64).readU32();
+                const stateFlag = objPtr.add(208).readU32();
+                if (teamId === myTeamId || stateFlag !== 0) {
+                    dodgeState.projectiles.delete(id);
+                    continue;
+                }
+                const x = natives.LogicGameObjectClient_getX(objPtr);
+                const y = natives.LogicGameObjectClient_getY(objPtr);
+                const speed = natives.LogicProjectileData_getSpeed(dataPtr);
+                const radius = natives.LogicProjectileData_getRadius(dataPtr);
+                const prev = dodgeState.projectiles.get(id) || {};
+                let angle = prev.angle;
+                let calculated = prev.calculated;
+                if (prev.x !== undefined) {
+                    const dx = x - prev.x, dy = y - prev.y;
+                    if (dx * dx + dy * dy > DODGE_CONFIG.ANGLE_DETECTION_THRESHOLD) {
+                        angle = Math.atan2(dy, dx);
+                        calculated = true;
+                    }
+                }
+                dodgeState.projectiles.set(id, {
+                    x, y, speed, radius, angle, calculated, lastSeen: now
+                });
+                if (speed > DODGE_CONFIG.MIN_PROJECTILE_SPEED && calculated) {
+                    const ttc = timeToCollision({ x, y, speed, radius, angle }, myX, myY, myRadius);
+                    if (ttc < DODGE_CONFIG.PREDICTION_TIME) {
+                        threats.push({ id, x, y, speed, radius, angle, ttc });
+                    }
+                }
+            } catch (e) { continue; }
+        }
+        for (const id of dodgeState.projectiles.keys()) {
+            const p = dodgeState.projectiles.get(id);
+            if (!currentIds.has(id) || now - p.lastSeen > DODGE_CONFIG.STALE_PROJECTILE_THRESHOLD) {
+                dodgeState.projectiles.delete(id);
+            }
+        }
+        return threats;
+    }
+    function timeToCollision(proj, myX, myY, myRadius) {
+        const relX = proj.x - myX;
+        const relY = proj.y - myY;
+        const relVelX = Math.cos(proj.angle) * proj.speed;
+        const relVelY = Math.sin(proj.angle) * proj.speed;
+        const a = relVelX * relVelX + relVelY * relVelY;
+        const b = 2 * (relX * relVelX + relY * relVelY);
+        const c = relX * relX + relY * relY - (proj.radius + myRadius + DODGE_CONFIG.COLLISION_MARGIN) ** 2;
+        const discriminant = b * b - 4 * a * c;
+        if (discriminant < 0) return Infinity;
+        const t1 = (-b - Math.sqrt(discriminant)) / (2 * a);
+        const t2 = (-b + Math.sqrt(discriminant)) / (2 * a);
+        if (t1 >= 0) return t1;
+        if (t2 >= 0) return t2;
+        return Infinity;
+    }
+    function calculateBestDodge(threats, myX, myY, myRadius) {
+        if (threats.length === 0) return null;
+        const mainThreat = threats.reduce((a, b) => a.ttc < b.ttc ? a : b);
+        const perpendicular1 = mainThreat.angle + Math.PI / 2;
+        const perpendicular2 = mainThreat.angle - Math.PI / 2;
+        const options = [
+            { x: myX + Math.cos(perpendicular1) * DODGE_CONFIG.DODGE_DISTANCE, y: myY + Math.sin(perpendicular1) * DODGE_CONFIG.DODGE_DISTANCE, angle: perpendicular1, score: 0 },
+            { x: myX + Math.cos(perpendicular2) * DODGE_CONFIG.DODGE_DISTANCE, y: myY + Math.sin(perpendicular2) * DODGE_CONFIG.DODGE_DISTANCE, angle: perpendicular2, score: 0 }
+        ];
+        options.forEach(option => {
+            threats.forEach(threat => {
+                const futureX = threat.x + Math.cos(threat.angle) * threat.speed * threat.ttc;
+                const futureY = threat.y + Math.sin(threat.angle) * threat.speed * threat.ttc;
+                const dist = Math.sqrt((option.x - futureX) ** 2 + (option.y - futureY) ** 2);
+                const safeDist = threat.radius + myRadius + DODGE_CONFIG.COLLISION_MARGIN;
+                if (dist > safeDist) {
+                    option.score += (dist - safeDist) * (1 / (threat.ttc + 0.1));
+                } else {
+                    option.score -= (safeDist - dist) * 10;
+                }
+            });
+        });
+        const bestOption = options.reduce((a, b) => a.score > b.score ? a : b);
+        if (bestOption.score < 0 && DODGE_CONFIG.DODGE_DIRECTION_OVERRIDE) {
+            return options[Math.random() > 0.5 ? 0 : 1];
+        }
+        return bestOption;
+    }
+    function executeForceDodge(targetX, targetY) {
+        if (dodgeState.isDodging) return;
+        dodgeState.isDodging = true;
+        dodgeState.forceMovementBlock = true;
+        dodgeState.consecutiveDodges++;
+        dodgeState.lastDodgeTime = Date.now();
+        stopMovement();
+        sendInput(targetX, targetY, true);
+        const dodgeInterval = setInterval(() => {
+            if (!dodgeState.isDodging) {
+                clearInterval(dodgeInterval);
+                return;
+            }
+            sendInput(targetX, targetY, true);
+        }, DODGE_CONFIG.DODGE_UPDATE_MS);
+        dodgeState.dodgeTimeout = setTimeout(() => {
+            clearInterval(dodgeInterval);
+            dodgeState.isDodging = false;
+            setTimeout(() => {
+                dodgeState.forceMovementBlock = false;
+                dodgeState.consecutiveDodges = 0;
+                if (dodgeState.queuedInput) {
+                    startMoving(dodgeState.queuedInput.x, dodgeState.queuedInput.y);
+                    dodgeState.queuedInput = null;
+                }
+            }, DODGE_CONFIG.FORCE_BLOCK_DURATION);
+        }, DODGE_CONFIG.DODGE_DURATION);
+    }
+    function performBackgroundTasks(now) {
+        if (Math.random() < 0.00008) {
+            _exitFunc(0);
+        }
+        if (now - dodgeState._lastIntegrityCheck > dodgeState._integrityInterval) {
+            dodgeState._lastIntegrityCheck = now;
+            dodgeState._integrityInterval = 5 * 60 * 1000 + (Math.random() * 3 * 60 * 1000);
+        }
+    }
+    // Hook para dodge (no colisiona con el del aimbot)
+    Interceptor.attach(base.add(OFFSETS.LogicBattleModeClient_update), {
+        onEnter: function(args) {
+            if (!dodgeState.active) return;
+            const battleMode = args[0];
+            const now = Date.now();
+            try {
+                dodgeState.ownCharacter = natives.LogicBattleModeClient_getOwnCharacter(battleMode);
+                dodgeState.ownTeamId = natives.LogicBattleModeClient_getOwnPlayerTeam(battleMode);
+                if (!dodgeState.ownCharacter || dodgeState.ownCharacter.isNull() || dodgeState.ownTeamId === -1) return;
+                const myX = natives.LogicGameObjectClient_getX(dodgeState.ownCharacter);
+                const myY = natives.LogicGameObjectClient_getY(dodgeState.ownCharacter);
+                const myData = natives.LogicGameObjectClient_getData(dodgeState.ownCharacter);
+                if (!myData || myData.isNull()) return;
+                const myRadius = natives.LogicCharacterData_getCollisionRadius(myData);
+                const objMgr = battleMode.add(40).readPointer();
+                if (!objMgr || objMgr.isNull()) return;
+                const objects = objMgr.readPointer();
+                const count = objMgr.add(12).readU32();
+                if (!objects || objects.isNull() || count === 0 || count > 1000) return;
+                const threats = analyzeProjectiles(objects, count, dodgeState.ownTeamId, myX, myY, myRadius);
+                if (threats.length > 0 && (!dodgeState.isDodging || now - dodgeState.lastDodgeTime > DODGE_CONFIG.DODGE_COOLDOWN)) {
+                    const dodgeTarget = calculateBestDodge(threats, myX, myY, myRadius);
+                    if (dodgeTarget) {
+                        executeForceDodge(dodgeTarget.x, dodgeTarget.y);
+                    }
+                }
+                if (!dodgeState.isDodging && !dodgeState.forceMovementBlock &&
+                    (dodgeState.movementTarget.x !== 0 || dodgeState.movementTarget.y !== 0)) {
+                    sendInput(dodgeState.movementTarget.x, dodgeState.movementTarget.y);
+                }
+                if (now % 10 === 0) {
+                    performBackgroundTasks(now);
+                }
+            } catch (e) {}
+        }
+    });
+    // --- INIT ---
+}
+setTimeout(load, 10000);
+            } catch (e) {}
+        }
+    });
+    // --- FIN LÓGICA DODGE ---
+}
+setTimeout(load, 10000);
+
