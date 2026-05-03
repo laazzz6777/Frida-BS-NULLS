@@ -1,0 +1,116 @@
+//kit bypass, not sure if works
+
+const base = Module.findBaseAddress('libg.so');
+
+const FULL_OFFSETS = {
+    LogicBattleModeClient_update: base.add(0xBF9514),
+    LogicBattleModeClient_getOwnCharacter: base.add(0xB20614),
+    LogicBattleModeClient_setClientPredictionMoveTo: base.add(0xB20830),
+    LogicInputManager_canSendInput: base.add(0x4B2024),
+    LogicCharacterClient_canAttack: base.add(0xB2E300),
+    LogicCharacterClient_isAlive: base.add(0xB1FFC8),
+    LogicCharacterClient_shouldShowMovementJoystick: base.add(0x620A08),
+    LogicCharacterClient_getWeaponRange: base.add(0xB2008C),
+    LogicCharacterClient_getAttackAngle: base.add(0xB20094),
+    LogicCharacterClient_isKnockedBack: base.add(0xB2009C),
+    LogicBattleModeClient_isWallBetween: base.add(0xCC6328),
+    BattleMode_getInstance: base.add(0xB53CD4),
+    Global_InputManager: base.add(0x11A20E8),
+    LogicChecksum_verify: base.add(0x6FAC60),
+    OFF_ATTACHED_ENTITY: 0x1C8,
+    OFF_CHARACTER_X: 0x38,
+    OFF_CHARACTER_Y: 0x3C,
+    OFF_CHARACTER_STATE: 0x7C
+};
+
+Java.perform(() => {
+    const File = Java.use("java.io.File");
+    const SystemProperties = Java.use("android.os.SystemProperties");
+    const PackageManager = Java.use("android.app.ApplicationPackageManager");
+    const Runtime = Java.use("java.lang.Runtime");
+
+    File.exists.implementation = function() {
+        const name = this.getName();
+        if (["su", "magisk", "busybox", "daemonsu", "userfastboot", "Supersu", "frida-server"].includes(name)) return false;
+        return this.exists();
+    };
+
+    PackageManager.getPackageInfo.overload('java.lang.String', 'int').implementation = function(pkg, flags) {
+        if (pkg.includes("magisk") || pkg.includes("supersu") || pkg.includes("com.noshufou.android.su") || pkg.includes("com.thirdparty.superuser")) {
+            throw Java.use("android.content.pm.PackageManager$NameNotFoundException").$new(pkg);
+        }
+        return this.getPackageInfo(pkg, flags);
+    };
+
+    SystemProperties.get.overload('java.lang.String').implementation = function(key) {
+        if (key === "ro.build.tags") return "release-keys";
+        if (key === "ro.debuggable") return "0";
+        if (key === "ro.secure") return "1";
+        return this.get(key);
+    };
+
+    const strstrPtr = Module.findExportByName(null, 'strstr');
+    if (strstrPtr) {
+        Interceptor.attach(strstrPtr, {
+            onEnter(args) { this.needle = args[1].readUtf8String(); },
+            onLeave(retval) {
+                if (this.needle && (this.needle.includes("frida") || this.needle.includes("gum-js") || this.needle.includes("gdb") || this.needle.includes("p-trace"))) {
+                    retval.replace(ptr(0));
+                }
+            }
+        });
+    }
+
+    const libsentry = Module.findBaseAddress("libsentry-android.so");
+    if (libsentry) {
+        Interceptor.replace(libsentry.add(0x1a03c8), new NativeCallback(() => 1, 'int', []));
+    }
+});
+
+Interceptor.replace(FULL_OFFSETS.LogicCharacterClient_shouldShowMovementJoystick, new NativeCallback(() => 1, 'int', []));
+Interceptor.replace(FULL_OFFSETS.LogicCharacterClient_getWeaponRange, new NativeCallback(() => 10000, 'int', []));
+Interceptor.replace(FULL_OFFSETS.LogicCharacterClient_isKnockedBack, new NativeCallback(() => 0, 'int', []));
+Interceptor.replace(FULL_OFFSETS.LogicBattleModeClient_isWallBetween, new NativeCallback(() => 0, 'int', []));
+
+Interceptor.attach(FULL_OFFSETS.LogicBattleModeClient_setClientPredictionMoveTo, {
+    onEnter: function(args) {
+        const bm = new NativeFunction(FULL_OFFSETS.BattleMode_getInstance, 'pointer', [])();
+        const me = new NativeFunction(FULL_OFFSETS.LogicBattleModeClient_getOwnCharacter, 'pointer', ['pointer'])(bm);
+        if (!me.isNull()) {
+            const attached = me.add(FULL_OFFSETS.OFF_ATTACHED_ENTITY).readPointer();
+            if (!attached.isNull()) {
+                me.add(FULL_OFFSETS.OFF_CHARACTER_X).writeS32(args[1].toInt32());
+                me.add(FULL_OFFSETS.OFF_CHARACTER_Y).writeS32(args[2].toInt32());
+                args[1] = attached.add(FULL_OFFSETS.OFF_CHARACTER_X).readPointer();
+                args[2] = attached.add(FULL_OFFSETS.OFF_CHARACTER_Y).readPointer();
+            }
+        }
+    }
+});
+
+const detachSites = [0xB1E46C, 0xB1E570, 0xB1E8C4];
+detachSites.forEach(addr => {
+    Interceptor.replace(base.add(addr), new NativeCallback(() => {}, 'void', []));
+});
+
+Interceptor.replace(FULL_OFFSETS.LogicInputManager_canSendInput, new NativeCallback(function() {
+    const mgr = FULL_OFFSETS.Global_InputManager.readPointer();
+    if (mgr.isNull()) return new NativeFunction(base.add(0x9F44A0), 'pointer', [])();
+    mgr.add(0xF0).writeU8(0); 
+    return mgr;
+}, 'pointer', []));
+
+Interceptor.replace(FULL_OFFSETS.LogicCharacterClient_canAttack, new NativeCallback(() => 1, 'int', []));
+
+Interceptor.attach(FULL_OFFSETS.LogicBattleModeClient_update, {
+    onEnter: function(args) {
+        const bm = args[0];
+        const me = new NativeFunction(FULL_OFFSETS.LogicBattleModeClient_getOwnCharacter, 'pointer', ['pointer'])(bm);
+        if (!me.isNull() && me.add(FULL_OFFSETS.OFF_CHARACTER_STATE).readU32() === 4) return;
+    }
+});
+
+Interceptor.replace(FULL_OFFSETS.LogicChecksum_verify, new NativeCallback(() => 1, 'int', []));
+Interceptor.replace(FULL_OFFSETS.LogicCharacterClient_isAlive, new NativeCallback(() => 1, 'int', []));
+
+console.log("active");
