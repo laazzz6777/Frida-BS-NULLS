@@ -1,0 +1,359 @@
+runAimbot() internal calls:
+
+FN.activateSkill():
+retType: "void"
+argTypes: ["pointer", "int", "int", "int", "int", "pointer", "pointer", "int", "int"]
+args[0] = battleScreen (pointer)
+args[1] = 0 (normal) or 1 (super)
+args[2] = aimX | 0 (int)
+args[3] = aimY | 0 (int)
+args[4] = 0 (int)
+args[5] = ptr(0) (pointer)
+args[6] = target (pointer)
+args[7] = 0 (int)
+args[8] = 0 (int)
+
+FN.useAccessory():
+retType: "void"
+argTypes: ["pointer", "pointer"]
+args[0] = State.ownCharPtr (pointer)
+args[1] = gadgetData (pointer from offset 0x150)
+
+FN.activateHyperCharge():
+retType: "void"
+argTypes: ["pointer"]
+args[0] = State.ownCharPtr (pointer)
+
+AimSolver.computeAimPoint():
+args[0] = srcX (float) - own X
+args[1] = srcY (float) - own Y
+args[2] = targetPtr (pointer) - enemy character
+
+AimSolver.selectBestTarget():
+args[0] = srcX (float) - own X
+args[1] = srcY (float) - own Y
+
+solveIntercept():
+args[0] = srcX (float)
+args[1] = srcY (float)
+args[2] = bulletSpeed (float)
+args[3] = tarX (float)
+args[4] = tarY (float)
+args[5] = tarVX (float)
+args[6] = tarVY (float)
+args[7] = maxIter (int)
+
+getEnemyPrediction(ptr):
+args[0] = ptr (pointer) - enemy character
+reads: LogicGameObjectClient_getX, LogicGameObjectClient_getY
+
+getEnemyFeatures(ptr, kf):
+args[0] = ptr (pointer) - enemy character
+args[1] = kf (KalmanFilter2D) - {x, y, vx, vy}
+reads: LogicCharacterClient_getHealth, LogicCharacterClient_getMaxHealth
+
+updateEnemyBehaviorLSTM(ptr, features):
+args[0] = ptr (pointer) - enemy character
+args[1] = features (array of 10 floats)
+reads: LogicGameObjectClient_getGlobalID
+
+safeReadPtr(State.battleClient, 8):
+offset 8 = battleScreen pointer
+
+
+
+```javascript
+createInput:
+retType: "pointer"
+argTypes: ["pointer", "int"]
+
+args[0] = inputPtr (pointer)
+args[1] = inputType (int)
+```
+
+```javascript
+addInput:
+retType: "void"
+argTypes: ["pointer", "pointer"]
+
+args[0] = inputManager (pointer)
+args[1] = inputPtr (pointer)
+```
+
+```javascript
+getCollisionRadius / getProjectileSpeed / getProjectileRadius / getCharProjSpeed / getCharDamage / getWeaponSpread / getWeaponInterval:
+retType: "uint32" or "float"
+argTypes: ["pointer"]
+
+args[0] = dataPtr (pointer)
+```
+
+```javascript
+getObjData:
+retType: "pointer"
+argTypes: ["pointer"]
+
+args[0] = characterPtr (pointer)
+```
+
+```javascript
+isWallBetween:
+retType: "bool"
+argTypes: ["pointer", "int", "int", "int", "int"]
+
+args[0] = battleModeClient (pointer)
+args[1] = x1 (int)
+args[2] = y1 (int)
+args[3] = x2 (int)
+args[4] = y2 (int)
+```
+
+```javascript
+getProjAngle / getAmmo / getMaxAmmo / getReloadRate / isReloading /
+getSuperCharge / getSuperChargeRate / getHyperCharge / isHyperChargeActive /
+getHyperChargeDuration / getAttackDelay / getAttackFrequency / getSkillRange /
+getDamage / isInvulnerable / isStealthed / isStunned / isSlowed / canBeTargeted /
+getGadgetCount / getGadgetCooldown:
+retType: "float" or "int" or "bool"
+argTypes: ["pointer"]
+
+args[0] = characterPtr (pointer)
+```
+
+```javascript
+useAccessory:
+retType: "void"
+argTypes: ["pointer", "pointer"]
+
+args[0] = characterPtr (pointer)
+args[1] = accessoryData (pointer)
+```
+
+```javascript
+activateHyperCharge:
+retType: "void"
+argTypes: ["pointer"]
+
+args[0] = characterPtr (pointer)
+```
+
+```javascript
+getDistance / getDistanceTo:
+retType: "float"
+argTypes: ["pointer", "pointer"]
+
+args[0] = object1 (pointer)
+args[1] = object2 (pointer)
+```
+
+```javascript
+isVisibleFor:
+retType: "bool"
+argTypes: ["pointer", "pointer"]
+
+args[0] = characterPtr (pointer)
+args[1] = observerPtr (pointer)
+```
+
+```javascript
+getOwnCharacter / matchmakingMgr_getInstance / logicUI_getInstance / tileMap_getInstance:
+retType: "pointer"
+argTypes: ["pointer"]
+
+args[0] = parentPtr (pointer)
+```
+
+```javascript
+getOwnPlayerTeam / getGameMode / getGameModeVariation / getAreaEffect / getDistance:
+retType: depends
+argTypes: depends
+
+getOwnPlayerTeam = ["pointer"]
+getGameMode = ["pointer"]
+getGameModeVariation = ["pointer"]
+getAreaEffect = ["pointer", "int"]
+```
+
+```javascript
+logicUI_addChild / logicUIButton_setText / logicUIButton_setStyle:
+retType: "void"
+argTypes: ["pointer", "pointer"]
+
+args[0] = parent (pointer)
+args[1] = child / textPtr / stylePtr (pointer)
+```
+
+```javascript
+logicUIButton_ctor / logicUISlider_ctor / logicPopup_ctor:
+retType: "void"
+argTypes: ["pointer"]
+
+args[0] = instancePtr (pointer)
+```
+
+```javascript
+logicUIButton_setPosition:
+retType: "void"
+argTypes: ["pointer", "float", "float"]
+
+args[0] = buttonPtr (pointer)
+args[1] = x (float)
+args[2] = y (float)
+```
+
+```javascript
+logicUISlider_setValue:
+retType: "void"
+argTypes: ["pointer", "float"]
+
+args[0] = sliderPtr (pointer)
+args[1] = value (float)
+```
+
+```javascript
+logicUISlider_getValue:
+retType: "float"
+argTypes: ["pointer"]
+
+args[0] = sliderPtr (pointer)
+```
+
+```javascript
+logicUISlider_setRange:
+retType: "void"
+argTypes: ["pointer", "float", "float"]
+
+args[0] = sliderPtr (pointer)
+args[1] = min (float)
+args[2] = max (float)
+```
+
+```javascript
+logicUISlider_setHandleStyle / logicUISlider_setStepSize:
+retType: "void"
+argTypes: ["pointer", "pointer"] or ["pointer", "float"]
+
+args[0] = sliderPtr (pointer)
+args[1] = stylePtr (pointer) or stepSize (float)
+```
+
+```javascript
+logicPopup_setTitle / logicPopup_setMessage:
+retType: "void"
+argTypes: ["pointer", "pointer"]
+
+args[0] = popupPtr (pointer)
+args[1] = textPtr (pointer)
+```
+
+```javascript
+logicUI_addPopup / logicPopup_onOkButtonClicked / logicUI_isDisplayingPopup:
+retType: "void" or "bool"
+argTypes: ["pointer"] or ["pointer", "pointer"]
+
+args[0] = uiPtr (pointer)
+args[1] = popupPtr (pointer) [only for addPopup]
+```
+
+```javascript
+getPingOffset:
+retType: "int32"
+argTypes: ["pointer"]
+
+args[0] = networkClientPtr (pointer)
+```
+
+```javascript
+getMapBoundaries:
+retType: "void"
+argTypes: ["pointer", "pointer", "pointer"]
+
+args[0] = battleClient (pointer)
+args[1] = minBuf (pointer)
+args[2] = maxBuf (pointer)
+```
+
+```javascript
+getGameState:
+retType: "int"
+argTypes: []
+
+no arguments
+```
+
+```javascript
+matchmakingMgr_startMatchmaking / matchmakingMgr_onMatchmakingButtonClicked:
+retType: "void"
+argTypes: ["pointer"]
+
+args[0] = matchmakingManager (pointer)
+```
+
+```javascript
+matchmakingMgr_isMatchmaking:
+retType: "bool"
+argTypes: ["pointer"]
+
+args[0] = matchmakingManager (pointer)
+```
+
+```javascript
+tileMap_getTile:
+retType: "pointer"
+argTypes: ["pointer", "int", "int"]
+
+args[0] = tileMap (pointer)
+args[1] = x (int)
+args[2] = y (int)
+```
+
+```javascript
+tile_isWall / tile_isBush / tile_isWater / tile_getTileType:
+retType: "bool" or "int"
+argTypes: ["pointer"]
+
+args[0] = tilePtr (pointer)
+```
+
+```javascript
+getCharVelocity / getCharRange:
+retType: "float"
+argTypes: ["pointer"]
+
+args[0] = characterPtr (pointer)
+```
+
+```javascript
+useSkill:
+retType: "void"
+argTypes: ["pointer", "pointer"]
+
+args[0] = characterPtr (pointer)
+args[1] = skillDataPtr (pointer)
+```
+
+```javascript
+StringCtor:
+retType: "pointer"
+argTypes: ["pointer", "pointer"]
+
+args[0] = bufferPtr (pointer)
+args[1] = stringPtr (pointer)
+```
+
+Projectile hook (ctor):
+args[0] = projPtr (pointer)    - the projectile instance
+args[1] = ownerPtr (pointer)   - the character who shot it
+args[2] = dataPtr (pointer)    - projectile data/config
+
+Projectile tracking State.projectiles:
+{
+    id:       int    - global ID from projPtr
+    x:        float  - spawn X
+    y:        float  - spawn Y
+    speed:    float  - from LogicProjectileData_getSpeed(dataPtr)
+    radius:   float  - from LogicProjectileData_getRadius(dataPtr)
+    angle:    float  - from LogicProjectileClient_getAngle(projPtr)
+    lastSeen: int    - Date.now() timestamp
+    own:      bool   - ownerPtr equals State.ownCharPtr
+}
