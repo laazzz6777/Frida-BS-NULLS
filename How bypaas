@@ -1,0 +1,77 @@
+how bypass(not sure offsets ok)
+
+
+for ignorerroot csv flag
+patch inside the main native library
+at address 0x7da4dc change the tbz instruction to always fall through
+or force the lookup result at 0x7da4d8 call to return 1
+alternatively edit csv file ignoreRoot to 1 before packing
+
+for magisk filesystem checks
+at offset 0xe15240 nop the stat call for sbin magisk
+at 0xe15250 change cbz to unconditional jump or nop
+at 0xe15254 nop the second stat for sbin dot magisk
+or patch the result encoding at 0xe15268 to always set 0
+
+for safetynet play integrity
+force global state to 2
+write value 2 at runtime memory address 0x1189e80
+or patch the compare at 0xdd9358 to always pass
+at 0xdd935c change bne to b or nop the error path
+at error string location 0xdd937c you can nop the logging
+
+for ui cheating panels
+they trigger after detection so above patches prevent them
+panel cheating reference at 0x68ad2c
+arrow cheating at 0x746cb8
+
+use frida for runtime patches on these offsets
+or use hex editor on the lib file for static patches
+test carefully after applying...
+
+dissasembly nanana
+0x007da4b4 -- this loads the page address into x1 for a data string
+0x007da4b8 -- this adds the exact offset making x1 point to the first key string
+0x007da4bc -- this moves x2 value into x0 as function argument
+0x007da4c0 -- this saves x2 value into x22 for later reuse
+0x007da4c4 -- this calls the csv key lookup function
+0x007da4c8 -- this jumps far ahead if the first flag bit is set skipping everything
+0x007da4cc -- this loads base page address for the ignoreRoot string
+0x007da4d0 -- this adds offset so x1 now points to ignoreRoot text
+0x007da4d4 -- this prepares the context pointer in x0 for lookup
+0x007da4d8 -- this calls csv lookup for ignoreRoot key result in w0
+0x007da4dc -- this loads secondary flag field from memory into w8
+0x007da4e0 -- this copies lookup result from w0 into w21
+0x007da4e4 -- this jumps forward if secondary flag is zero
+0x007da4e8 -- this reloads base page for ignoreRoot string again
+0x007da4ec -- this adds offset to point to ignoreRoot
+0x007da4f0 -- this sets up context pointer for second lookup
+0x007da4f4 -- this calls csv lookup again for ignoreRoot
+0x007da4f8 -- this if ignoreRoot bit is NOT set jumps to detection code otherwise falls through to bypass
+
+0x00e15240 -- this loads base page for sbin magisk path string
+0x00e15244 -- this adds offset so x0 points to sbin magisk
+0x00e15248 -- this sets up stack buffer pointer in x1 for stat result
+0x00e1524c -- this calls stat to check if the path exists
+0x00e15250 -- this if stat succeeded jumps ahead
+0x00e15254 -- this loads base page for sbin dot magisk path
+0x00e15258 -- this adds offset so x0 points to sbin dot magisk
+0x00e1525c -- this sets stack buffer for stat again
+0x00e15260 -- this calls stat on the second magisk path
+0x00e15264 -- this compares stat return value to zero
+0x00e15268 -- this sets w8 to 1 if path exists
+0x00e1526c -- this shifts the bit to position 7 in flags word
+
+0x00dd934c -- this loads base page for global state pointer
+0x00dd9350 -- this adds offset to reach the safetynet state variable
+0x00dd9354 -- this loads the current state value into w8
+0x00dd9358 -- this compares the state value against 2
+0x00dd935c -- this branches to error path if state is not exactly 2
+0x00dd9360 -- this loads base for callback pointer area
+0x00dd9364 -- this loads the callback function pointer into x9
+0x00dd9368 -- this clears the callback slot after using it
+0x00dd936c -- this skips if callback pointer was null
+0x00dd937c -- this loads base page for error string
+0x00dd9380 -- this adds offset to point to safetynet error message
+0x00dd9384 -- this sets up stack for string construction
+0x00dd9388 -- this calls function to build the error string
